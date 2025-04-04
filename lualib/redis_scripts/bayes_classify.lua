@@ -1,37 +1,41 @@
--- Lua script to perform bayes classification
--- This script accepts the following parameters:
--- key1 - prefix for bayes tokens (e.g. for per-user classification)
--- key2 - set of tokens encoded in messagepack array of strings
+-- Lua script to perform multi-class Bayesian classification
+-- Supports categories: finance, personal, important, spam, promotional, social
+-- Instead of storing just H (ham) and S (spam), it retrieves and stores counts for each category.\
 
 local prefix = KEYS[1]
-local output_spam = {}
-local output_ham = {}
+local input_tokens = cmsgpack.unpack(KEYS[2])
 
-local learned_ham = tonumber(redis.call('HGET', prefix, 'learns_ham')) or 0
-local learned_spam = tonumber(redis.call('HGET', prefix, 'learns_spam')) or 0
+-- Define categories
+local categories = {"finance", "personal", "important", "spam", "promotional", "social"}
+local output_classes = {}  -- Stores token counts per category
+local learned_counts = {}  -- Stores total learn counts per category
 
--- Output is a set of pairs (token_index, token_count), tokens that are not
--- found are not filled.
--- This optimisation will save a lot of space for sparse tokens, and in Bayes that assumption is normally held
-
-if learned_ham > 0 and learned_spam > 0 then
-  local input_tokens = cmsgpack.unpack(KEYS[2])
-  for i, token in ipairs(input_tokens) do
-    local token_data = redis.call('HMGET', token, 'H', 'S')
-
-    if token_data then
-      local ham_count = token_data[1]
-      local spam_count = token_data[2]
-
-      if ham_count then
-        table.insert(output_ham, { i, tonumber(ham_count) })
-      end
-
-      if spam_count then
-        table.insert(output_spam, { i, tonumber(spam_count) })
-      end
-    end
-  end
+-- Initialize tables
+for _, category in ipairs(categories) do
+    output_classes[category] = {}
+    learned_counts[category] = tonumber(redis.call('HGET', prefix, 'learns_' .. category)) or 0
 end
 
-return { learned_ham, learned_spam, output_ham, output_spam }
+-- Check if learning data exists
+local has_learning_data = false
+for _, count in pairs(learned_counts) do
+    if count > 0 then
+        has_learning_data = true
+        break
+    end
+end
+
+if has_learning_data then
+    for i, token in ipairs(input_tokens) do
+        local token_data = redis.call('HMGET', token, unpack(categories))  -- Fetch all category counts
+
+        for j, category in ipairs(categories) do
+            local count = token_data[j]
+            if count then
+                table.insert(output_classes[category], {i, tonumber(count)})  -- Store category count
+            end
+        end
+    end
+end
+
+return {learned_counts, output_classes}
