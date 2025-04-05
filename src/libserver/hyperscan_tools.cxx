@@ -82,15 +82,8 @@ INIT_LOG_MODULE_PUBLIC(hyperscan)
 
 namespace rspamd::util {
 
-/*
- * A singleton class that is responsible for deletion of the outdated hyperscan files
- * One issue is that it must know about HS files in all workers, which is a problem
- * TODO: we need to export hyperscan caches from all workers to a single place where
- * we can clean them up (probably, to the main process)
- */
 class hs_known_files_cache {
 private:
-	// These fields are filled when we add new known cache files
 	ankerl::svector<std::string, 4> cache_dirs;
 	ankerl::svector<std::string, 8> cache_extensions;
 	ankerl::unordered_dense::set<std::string> known_cached_files;
@@ -101,7 +94,6 @@ private:
 
 	virtual ~hs_known_files_cache()
 	{
-		// Cleanup cache dir
 		cleanup_maybe();
 	}
 
@@ -212,7 +204,6 @@ public:
 	auto cleanup_maybe() -> void
 	{
 		auto env_cleanup_disable = std::getenv("RSPAMD_NO_CLEANUP");
-		/* We clean dir merely if we are running from the main process */
 		if (rspamd_current_worker == nullptr && env_cleanup_disable == nullptr && loaded) {
 			const auto *log_func = RSPAMD_LOG_FUNC;
 			auto cleanup_dir = [&](std::string_view dir) -> void {
@@ -280,21 +271,17 @@ public:
 	}
 };
 
-
-/**
- * This is a higher level representation of the cached hyperscan file
- */
 struct hs_shared_database {
-	hs_database_t *db = nullptr; /**< internal database (might be in a shared memory) */
+	hs_database_t *db = nullptr;
 	std::optional<raii_mmaped_file> maybe_map;
 	std::string cached_path;
+	ankerl::unordered_dense::map<int, std::string> category_map; // Added for multiclass
 
 	~hs_shared_database()
 	{
 		if (!maybe_map) {
 			hs_free_database(db);
 		}
-		// Otherwise, handled by maybe_map dtor
 	}
 
 	explicit hs_shared_database(raii_mmaped_file &&map, hs_database_t *db)
@@ -309,7 +296,6 @@ struct hs_shared_database {
 			cached_path = fname;
 		}
 		else {
-			/* Likely a test case */
 			cached_path = "";
 		}
 	}
@@ -323,6 +309,7 @@ struct hs_shared_database {
 	{
 		std::swap(db, other.db);
 		std::swap(maybe_map, other.maybe_map);
+		std::swap(category_map, other.category_map);
 		return *this;
 	}
 };
@@ -334,6 +321,7 @@ struct real_hs_db {
 	std::uint64_t platform;
 	std::uint32_t crc32;
 };
+
 static auto
 hs_is_valid_database(void *raw, std::size_t len, std::string_view fname) -> tl::expected<bool, std::string>
 {
@@ -390,6 +378,42 @@ hs_shared_from_serialized(hs_known_files_cache &hs_cache, raii_mmaped_file &&map
 	return tl::expected<hs_shared_database, error>{tl::in_place, target, map.get_file().get_name().data()};
 }
 
+// Load pattern-to-category mappings from a .categories file
+static auto
+load_pattern_category_map(const std::string &filename) -> tl::expected<ankerl::unordered_dense::map<int, std::string>, error>
+{
+	auto file = raii_file::open(filename.c_str(), O_RDONLY);
+	if (!file) {
+		return tl::make_unexpected(error{"cannot open category file", errno});
+	}
+
+	auto mapped = raii_mmaped_file::mmap_shared(std::move(file.value()), PROT_READ);
+	if (!mapped) {
+		return tl::make_unexpected(error{"cannot mmap category file", errno});
+	}
+
+	ankerl::unordered_dense::map<int, std::string> category_map;
+	std::string_view content{(const char *)mapped.value().get_map(), mapped.value().get_size()};
+	int pattern_id = 0;
+
+	for (auto pos = content.begin(); pos != content.end();) {
+		auto line_end = std::find(pos, content.end(), '\n');
+		std::string_view line(pos, line_end - pos);
+		if (!line.empty()) {
+			auto sep = line.find(':');
+			if (sep != std::string_view::npos && sep < line.size() - 1) {
+				std::string category(line.substr(0, sep));
+				category.erase(0, category.find_first_not_of(" \t"));
+				category.erase(category.find_last_not_of(" \t") + 1);
+				category_map[pattern_id++] = std::move(category);
+			}
+		}
+		pos = (line_end != content.end()) ? line_end + 1 : content.end();
+	}
+
+	return category_map;
+}
+
 auto load_cached_hs_file(const char *fname, std::int64_t offset = 0) -> tl::expected<hs_shared_database, error>
 {
 	auto &hs_cache = hs_known_files_cache::get();
@@ -415,7 +439,6 @@ auto load_cached_hs_file(const char *fname, std::int64_t offset = 0) -> tl::expe
 											 }
 											 else {
 												 auto &tmpfile_checked = tmpfile.value();
-												 // Store owned string
 												 auto tmpfile_name = std::string{tmpfile_checked.get_name()};
 												 std::size_t unserialized_size;
 
@@ -460,13 +483,6 @@ auto load_cached_hs_file(const char *fname, std::int64_t offset = 0) -> tl::expe
 													 }
 													 else {
 														 free(buf);
-														 /*
-														 * Unlink target file before renaming to avoid
-														 * race condition.
-														 * So what we have is that `new_file_locked`
-														 * will have flock on that file, so it will be
-														 * replaced after unlink safely, and also unlocked.
-														 */
 														 (void) unlink(unserialized_fname.c_str());
 														 if (rename(tmpfile_name.c_str(),
 																	unserialized_fname.c_str()) == -1) {
@@ -478,18 +494,15 @@ auto load_cached_hs_file(const char *fname, std::int64_t offset = 0) -> tl::expe
 															 }
 														 }
 														 else {
-															 /* Unlock file but mark it as immortal first to avoid deletion */
 															 tmpfile_checked.make_immortal();
 															 (void) tmpfile_checked.unlock();
 														 }
 													 }
 												 }
-												 /* Reopen in RO mode */
 												 return raii_file::open(unserialized_fname.c_str(), O_RDONLY);
 											 };
 										 })
 										 .or_else([&](auto unused) -> tl::expected<raii_file, error> {
-											 // Cannot create file, so try to open it in RO mode
 											 return raii_file::open(unserialized_fname.c_str(), O_RDONLY);
 										 });
 
@@ -500,11 +513,6 @@ auto load_cached_hs_file(const char *fname, std::int64_t offset = 0) -> tl::expe
 				auto &unserialized_checked = unserialized_file.value();
 
 				if (unserialized_checked.get_size() == 0) {
-					/*
-					 * This is a case when we have a file that is currently
-					 * being created by another process.
-					 * We cannot use it!
-					 */
 					ret = hs_shared_from_serialized(hs_cache, std::forward<T>(cached_serialized), offset);
 				}
 				else {
@@ -517,133 +525,83 @@ auto load_cached_hs_file(const char *fname, std::int64_t offset = 0) -> tl::expe
 			else {
 				ret = hs_shared_from_serialized(hs_cache, std::forward<T>(cached_serialized), offset);
 			}
-#else // defined(HS_MAJOR) && defined(HS_MINOR) && HS_MAJOR >= 5 && HS_MINOR >= 4
+#else
 			auto ret = hs_shared_from_serialized(hs_cache, std::forward<T>(cached_serialized), offset);
-#endif// defined(HS_MAJOR) && defined(HS_MINOR) && HS_MAJOR >= 5 && HS_MINOR >= 4 \
-	// Add serialized file to cache merely if we have successfully loaded the actual db
+#endif
 			if (ret.has_value()) {
 				hs_cache.add_cached_file(cached_serialized.get_file());
 			}
 			return ret;
 		});
 }
-}// namespace rspamd::util
 
-/* C API */
+static std::string
+select_best_category(const std::vector<std::string>& matched_categories)
+{
+	if (matched_categories.empty()) return "unknown";
+
+	ankerl::unordered_dense::map<std::string, int> category_count;
+	for (const auto& cat : matched_categories) {
+		category_count[cat]++;
+	}
+
+	return std::max_element(category_count.begin(), category_count.end(),
+							[](const auto& a, const auto& b) {
+								return a.second < b.second;
+							})->first;
+}
+
+}// namespace rspamd::util
 
 #define CXX_DB_FROM_C(obj) (reinterpret_cast<rspamd::util::hs_shared_database *>(obj))
 #define C_DB_FROM_CXX(obj) (reinterpret_cast<rspamd_hyperscan_t *>(obj))
 
-std::string select_best_category(const std::vector<std::string>& matched_categories) {
-    if (matched_categories.empty()) return "unknown";
-
-    // Frequency-based selection for simplicity
-    std::unordered_map<std::string, int> category_count;
-
-    for (const auto& cat : matched_categories) {
-        category_count[cat]++;
-    }
-
-    // Return category with the highest count
-    return std::max_element(category_count.begin(), category_count.end(),
-                            [](const auto& a, const auto& b) {
-                                return a.second < b.second;
-                            })->first;
-}
-
-/*
- * Parses patterns with category prefixes (e.g., "spam:.*free money.*") 
- * and builds a mapping from pattern ID to category label.
- */
-std::unordered_map<int, std::string> convert_to_multiclass(const std::vector<std::string> &patterns_with_categories)
+rspamd_hyperscan_t *
+rspamd_hyperscan_maybe_load(const char *filename, goffset offset)
 {
-    std::unordered_map<int, std::string> category_map;
+	auto maybe_db = rspamd::util::load_cached_hs_file(filename, offset);
 
-    for (std::size_t i = 0; i < patterns_with_categories.size(); ++i) {
-        const auto &pattern = patterns_with_categories[i];
+	if (maybe_db.has_value()) {
+		auto *ndb = new rspamd::util::hs_shared_database;
+		*ndb = std::move(maybe_db.value());
 
-        // Example format: "category:regex"
-        auto sep = pattern.find(':');
-        if (sep != std::string::npos && sep < pattern.size() - 1) {
-            std::string category = pattern.substr(0, sep);
-            std::string regex = pattern.substr(sep + 1);
+		// Load category metadata
+		std::string category_meta_filename = std::string(filename) + ".categories";
+		auto maybe_category_map = rspamd::util::load_pattern_category_map(category_meta_filename);
 
-            // Optionally, trim whitespace from category
-            category.erase(0, category.find_first_not_of(" \t"));
-            category.erase(category.find_last_not_of(" \t") + 1);
+		if (maybe_category_map.has_value()) {
+			ndb->category_map = std::move(maybe_category_map.value());
+			msg_debug_hyperscan("loaded category map for multi-class classification: %zu entries",
+								ndb->category_map.size());
+		}
+		else {
+			msg_info_hyperscan("no category map found for: %s, defaulting to unknown categories",
+							   category_meta_filename.c_str());
+		}
 
-            category_map[i] = category;
-        }
-        else {
-            msg_warn("Pattern '%s' does not have a valid category prefix, skipping", pattern.c_str());
-        }
-    }
+		return C_DB_FROM_CXX(ndb);
+	}
+	else {
+		auto error = maybe_db.error();
 
-    return category_map;
+		switch (error.category) {
+		case rspamd::util::error_category::CRITICAL:
+			msg_err_hyperscan("critical error when trying to load cached hyperscan: %s",
+							  error.error_message.data());
+			break;
+		case rspamd::util::error_category::IMPORTANT:
+			msg_info_hyperscan("error when trying to load cached hyperscan: %s",
+							   error.error_message.data());
+			break;
+		default:
+			msg_debug_hyperscan("error when trying to load cached hyperscan: %s",
+								error.error_message.data());
+			break;
+		}
+	}
+
+	return nullptr;
 }
-
-// rspamd_hyperscan_maybe_load loads an optional .categories file containing pattern-to-category mappings,
-// and stores it in the Hyperscan shared database for use in later classification.
-rspamd_hyperscan_t* rspamd_hyperscan_maybe_load(const char *filename, goffset offset)
-{
-    auto maybe_db = rspamd::util::load_cached_hs_file(filename, offset);
-
-    if (maybe_db.has_value()) {
-        auto *ndb = new rspamd::util::hs_shared_database;
-        *ndb = std::move(maybe_db.value());
-
-        // Load category metadata
-        std::string category_meta_filename = std::string(filename) + ".categories";
-        auto maybe_category_map = rspamd::util::load_pattern_category_map(category_meta_filename);
-
-        if (maybe_category_map.has_value()) {
-            ndb->category_map = std::move(maybe_category_map.value());
-            msg_debug_hyperscan("loaded category map for multi-class classification: %zu entries",
-                                ndb->category_map.size());
-        } else {
-            msg_warn_hyperscan("no category map found for: %s, defaulting to unknown categories",
-                               category_meta_filename.c_str());
-        }
-
-        return C_DB_FROM_CXX(ndb);
-    } else {
-        auto error = maybe_db.error();
-
-        switch (error.category) {
-        case rspamd::util::error_category::CRITICAL:
-            msg_err_hyperscan("critical error when trying to load cached hyperscan: %s",
-                              error.error_message.data());
-            break;
-        case rspamd::util::error_category::IMPORTANT:
-            msg_info_hyperscan("error when trying to load cached hyperscan: %s",
-                               error.error_message.data());
-            break;
-        default:
-            msg_debug_hyperscan("error when trying to load cached hyperscan: %s",
-                                error.error_message.data());
-            break;
-        }
-    }
-
-    return nullptr;
-}
-
-const char* rspamd_hyperscan_get_category(rspamd_hyperscan_t *db, const std::vector<int>& matched_ids) {
-    auto *real_db = CXX_DB_FROM_C(db);
-
-    std::vector<std::string> matched_categories;
-
-    for (int id : matched_ids) {
-        auto it = real_db->category_map.find(id);
-        if (it != real_db->category_map.end()) {
-            matched_categories.push_back(it->second);
-        }
-    }
-
-    static std::string best_category = select_best_category(matched_categories); // store statically
-    return best_category.c_str();
-}
-
 
 hs_database_t *
 rspamd_hyperscan_get_database(rspamd_hyperscan_t *db)
@@ -655,21 +613,23 @@ rspamd_hyperscan_get_database(rspamd_hyperscan_t *db)
 rspamd_hyperscan_t *
 rspamd_hyperscan_from_raw_db(hs_database_t *db, const char *fname)
 {
-    auto *ndb = new rspamd::util::hs_shared_database{db, fname};
+	auto *ndb = new rspamd::util::hs_shared_database{db, fname};
 
-    // 🔽 Load associated category metadata (e.g., fname.categories)
-    std::string category_meta_filename = std::string(fname) + ".categories";
-    auto maybe_category_map = rspamd::util::load_pattern_category_map(category_meta_filename);
+	if (fname) {
+		std::string category_meta_filename = std::string(fname) + ".categories";
+		auto maybe_category_map = rspamd::util::load_pattern_category_map(category_meta_filename);
 
-    if (maybe_category_map.has_value()) {
-        ndb->category_map = std::move(maybe_category_map.value());
-        msg_debug_hyperscan("loaded category map from raw db: %zu entries",
-                            ndb->category_map.size());
-    } else {
-        msg_info_hyperscan("no category map found for raw db: %s", category_meta_filename.c_str());
-    }
+		if (maybe_category_map.has_value()) {
+			ndb->category_map = std::move(maybe_category_map.value());
+			msg_debug_hyperscan("loaded category map from raw db: %zu entries",
+								ndb->category_map.size());
+		}
+		else {
+			msg_info_hyperscan("no category map found for raw db: %s", category_meta_filename.c_str());
+		}
+	}
 
-    return C_DB_FROM_CXX(ndb);
+	return C_DB_FROM_CXX(ndb);
 }
 
 void rspamd_hyperscan_free(rspamd_hyperscan_t *db, bool invalid)
@@ -687,7 +647,6 @@ void rspamd_hyperscan_notice_known(const char *fname)
 	rspamd::util::hs_known_files_cache::get().add_cached_file(fname);
 
 	if (rspamd_current_worker != nullptr) {
-		/* Also notify main process */
 		struct rspamd_srv_command notice_cmd;
 
 		if (strlen(fname) >= sizeof(notice_cmd.cmd.hyperscan_cache_file.path)) {
@@ -698,7 +657,7 @@ void rspamd_hyperscan_notice_known(const char *fname)
 			notice_cmd.type = RSPAMD_SRV_NOTICE_HYPERSCAN_CACHE;
 			rspamd_strlcpy(notice_cmd.cmd.hyperscan_cache_file.path, fname, sizeof(notice_cmd.cmd.hyperscan_cache_file.path));
 			rspamd_srv_send_command(rspamd_current_worker,
-									rspamd_current_worker->srv->event_loop, &notice_cmd, -1,
+									rspamd_current_worker->srv->event_loop, notice_cmd, -1,
 									nullptr,
 									nullptr);
 		}
@@ -713,6 +672,23 @@ void rspamd_hyperscan_cleanup_maybe(void)
 void rspamd_hyperscan_notice_loaded(void)
 {
 	rspamd::util::hs_known_files_cache::get().notice_loaded();
+}
+
+const char* rspamd_hyperscan_get_category(rspamd_hyperscan_t *db, const std::vector<int>& matched_ids)
+{
+	auto *real_db = CXX_DB_FROM_C(db);
+	std::vector<std::string> matched_categories;
+
+	for (int id : matched_ids) {
+		auto it = real_db->category_map.find(id);
+		if (it != real_db->category_map.end()) {
+			matched_categories.push_back(it->second);
+		}
+	}
+
+	static thread_local std::string best_category;
+	best_category = rspamd::util::select_best_category(matched_categories);
+	return best_category.c_str();
 }
 
 #endif// WITH_HYPERSCAN
