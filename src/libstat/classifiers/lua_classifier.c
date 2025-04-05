@@ -127,8 +127,8 @@ lua_classifier_init(struct rspamd_config *cfg,
 }
 gboolean
 lua_classifier_classify(struct rspamd_classifier *cl,
-                        GPtrArray *tokens,
-                        struct rspamd_task *task)
+                                                GPtrArray *tokens,
+                                                struct rspamd_task *task)
 {
     struct rspamd_lua_classifier_ctx *ctx;
     struct rspamd_task **ptask;
@@ -187,11 +187,11 @@ lua_classifier_classify(struct rspamd_classifier *cl,
 /* Modified learning function to support multi-class */
 gboolean
 lua_classifier_learn_spam(struct rspamd_classifier *cl,
-                          GPtrArray *tokens,
-                          struct rspamd_task *task,
-                          const char *category, /* Instead of boolean spam */
-                          gboolean unlearn,
-                          GError **err)
+                                                  GPtrArray *tokens,
+                                                  struct rspamd_task *task,
+                                                  const char *category, /* Instead of boolean spam */
+                                                  gboolean unlearn,
+                                                  GError **err)
 {
     struct rspamd_lua_classifier_ctx *ctx;
     struct rspamd_task **ptask;
