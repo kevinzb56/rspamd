@@ -17,6 +17,15 @@
 #ifndef CLASSIFIERS_H
 #define CLASSIFIERS_H
 
+#define CATEGORY_SPAM 0
+#define CATEGORY_HAM 1
+#define CATEGORY_FINANCE 2
+#define CATEGORY_IMPORTANT 3
+#define CATEGORY_PERSONAL 4
+#define CATEGORY_PROMOTIONAL 5
+#define CATEGORY_SOCIAL 6
+// #define CATEGORY_UNKNOWN -1	// this is optional
+
 #include "config.h"
 #include "mem_pool.h"
 #include "contrib/libev/ev.h"
@@ -44,15 +53,17 @@ struct rspamd_stat_classifier {
 						  struct rspamd_classifier *cl);
 
 	gboolean (*classify_func)(struct rspamd_classifier *ctx,
-							  GPtrArray *tokens,
-							  struct rspamd_task *task);
+                          GPtrArray *tokens,
+                          struct rspamd_task *task,
+                          gint *category); // Output category
 
-	gboolean (*learn_spam_func)(struct rspamd_classifier *ctx,
-								GPtrArray *input,
-								struct rspamd_task *task,
-								gboolean is_spam,
-								gboolean unlearn,
-								GError **err);
+	gboolean (*learn_func)(struct rspamd_classifier *ctx,
+                       GPtrArray *tokens,
+                       struct rspamd_task *task,
+                       gint category, // Multi-class support
+                       gboolean unlearn,
+                       GError **err);
+
 
 	void (*fin_func)(struct rspamd_classifier *cl);
 };
@@ -63,15 +74,17 @@ gboolean bayes_init(struct rspamd_config *cfg,
 					struct rspamd_classifier *);
 
 gboolean bayes_classify(struct rspamd_classifier *ctx,
-						GPtrArray *tokens,
-						struct rspamd_task *task);
+                        GPtrArray *tokens,
+                        struct rspamd_task *task,
+                        gint *category); // Modify to return the predicted category
 
-gboolean bayes_learn_spam(struct rspamd_classifier *ctx,
-						  GPtrArray *tokens,
-						  struct rspamd_task *task,
-						  gboolean is_spam,
-						  gboolean unlearn,
-						  GError **err);
+gboolean bayes_learn(struct rspamd_classifier *ctx,
+                     GPtrArray *tokens,
+                     struct rspamd_task *task,
+                     gint category, // Specify category for training
+                     gboolean unlearn,
+                     GError **err);
+
 
 void bayes_fin(struct rspamd_classifier *);
 
@@ -81,21 +94,26 @@ gboolean lua_classifier_init(struct rspamd_config *cfg,
 							 struct rspamd_classifier *);
 
 gboolean lua_classifier_classify(struct rspamd_classifier *ctx,
-								 GPtrArray *tokens,
-								 struct rspamd_task *task);
+                                 GPtrArray *tokens,
+                                 struct rspamd_task *task,
+                                 gint *category); // Store the predicted category
 
-gboolean lua_classifier_learn_spam(struct rspamd_classifier *ctx,
-								   GPtrArray *tokens,
-								   struct rspamd_task *task,
-								   gboolean is_spam,
-								   gboolean unlearn,
-								   GError **err);
+
+gboolean lua_classifier_learn(struct rspamd_classifier *ctx,
+                              GPtrArray *tokens,
+                              struct rspamd_task *task,
+                              gint category, // Multi-class support
+                              gboolean unlearn,
+                              GError **err);
+
 
 extern int rspamd_bayes_log_id;
-#define msg_debug_bayes(...) rspamd_conditional_debug_fast(NULL, task->from_addr,                                  \
-														   rspamd_bayes_log_id, "bayes", task->task_pool->tag.uid, \
-														   G_STRFUNC,                                              \
-														   __VA_ARGS__)
+#define msg_debug_bayes(task, category, ...) \
+    rspamd_conditional_debug_fast(NULL, task->from_addr, \
+                                  rspamd_bayes_log_id, "bayes", task->task_pool->tag.uid, \
+                                  G_STRFUNC, \
+                                  "Category: %d, ", (category != NULL) ? *category : -1, __VA_ARGS__)
+
 #define msg_debug_bayes_cfg(...) rspamd_conditional_debug_fast(NULL, NULL,                                           \
 															   rspamd_bayes_log_id, "bayes", cfg->cfg_pool->tag.uid, \
 															   G_STRFUNC,                                            \

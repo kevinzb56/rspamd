@@ -25,6 +25,29 @@ local local_conf = rspamd_paths['LOCAL_CONFDIR']
 local local_rules = rspamd_paths['RULESDIR']
 local rspamd_util = require "rspamd_util"
 
+-- Define supported categories for multiclass classification
+local categories = {
+  "FINANCE",
+  "IMPORTANT",
+  "PERSONAL",
+  "PROMOTIONAL",
+  "SOCIAL",
+  "SPAM"
+}
+
+-- Function to register a symbol with a category prefix
+local function register_categorized_symbol(category, name, opts)
+  if not categories[category] then
+    local rspamd_logger = require "rspamd_logger"
+    rspamd_logger.errx(rspamd_config, "Invalid category: %s for symbol %s", category, name)
+    return
+  end
+  local full_name = category .. "_" .. name
+  opts.name = full_name
+  rspamd_config:register_symbol(opts)
+end
+
+-- Load rule files
 dofile(local_rules .. '/archives.lua')
 dofile(local_rules .. '/regexp/headers.lua')
 dofile(local_rules .. '/regexp/misc.lua')
@@ -43,10 +66,10 @@ dofile(local_rules .. '/bounce.lua')
 dofile(local_rules .. '/content.lua')
 dofile(local_rules .. '/controller/init.lua')
 
+-- Load local overrides
 if rspamd_util.file_exists(local_conf .. '/rspamd.local.lua') then
   dofile(local_conf .. '/rspamd.local.lua')
 else
-  -- Legacy lua/rspamd.local.lua
   if rspamd_util.file_exists(local_conf .. '/lua/rspamd.local.lua') then
     dofile(local_conf .. '/lua/rspamd.local.lua')
   end
@@ -60,6 +83,7 @@ if rspamd_util.file_exists(local_conf .. '/local.d/rspamd.lua') then
   dofile(local_conf .. '/local.d/rspamd.lua')
 end
 
+-- Process lua_maps
 local rmaps = rspamd_config:get_all_opt("lua_maps")
 if rmaps and type(rmaps) == 'table' then
   local rspamd_logger = require "rspamd_logger"
