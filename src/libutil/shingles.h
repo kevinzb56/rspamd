@@ -1,5 +1,5 @@
 /*-
- * Copyright 2016 Vsevolod Stakhov
+ * Copyright 2016-2025 Vsevolod Stakhov
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -26,14 +26,15 @@ extern "C" {
 #endif
 
 struct rspamd_shingle {
-	uint64_t hashes[RSPAMD_SHINGLE_SIZE];
+    uint64_t hashes[RSPAMD_SHINGLE_SIZE];
+    char *categories[RSPAMD_SHINGLE_SIZE]; /* Array of pointers to category strings */
 };
 
 enum rspamd_shingle_alg {
-	RSPAMD_SHINGLES_OLD = 0,
-	RSPAMD_SHINGLES_XXHASH,
-	RSPAMD_SHINGLES_MUMHASH,
-	RSPAMD_SHINGLES_FAST
+    RSPAMD_SHINGLES_OLD = 0,
+    RSPAMD_SHINGLES_XXHASH,
+    RSPAMD_SHINGLES_MUMHASH,
+    RSPAMD_SHINGLES_FAST
 };
 
 /**
@@ -43,7 +44,7 @@ enum rspamd_shingle_alg {
  * @return shingle value
  */
 typedef uint64_t (*rspamd_shingles_filter)(uint64_t *input, gsize count,
-										   int shno, const unsigned char *key, gpointer ud);
+                                           int shno, const unsigned char *key, gpointer ud);
 
 /**
  * Generate shingles from the input of fixed size strings using lemmatizer
@@ -53,30 +54,36 @@ typedef uint64_t (*rspamd_shingles_filter)(uint64_t *input, gsize count,
  * @param pool pool to allocate shingles array
  * @param filter hashes filtering function
  * @param filterd opaque data for filtering function
+ * @param alg shingle algorithm to use
+ * @param categories optional array of category strings (NULL if not used)
  * @return shingles array
  */
 struct rspamd_shingle *rspamd_shingles_from_text(GArray *input,
-												 const unsigned char key[16],
-												 rspamd_mempool_t *pool,
-												 rspamd_shingles_filter filter,
-												 gpointer filterd,
-												 enum rspamd_shingle_alg alg);
+                                                 const unsigned char key[16],
+                                                 rspamd_mempool_t *pool,
+                                                 rspamd_shingles_filter filter,
+                                                 gpointer filterd,
+                                                 enum rspamd_shingle_alg alg,
+                                                 const char **categories);
 
 /**
  * Generate shingles from the DCT matrix of an image
- * @param dct discrete cosine transfor matrix (must be 64x64)
+ * @param dct discrete cosine transform matrix (must be 64x64)
  * @param key secret key used to generate shingles
  * @param pool pool to allocate shingles array
  * @param filter hashes filtering function
  * @param filterd opaque data for filtering function
+ * @param alg shingle algorithm to use
+ * @param categories optional array of category strings (NULL if not used)
  * @return shingles array
  */
 struct rspamd_shingle *rspamd_shingles_from_image(unsigned char *dct,
-												  const unsigned char key[16],
-												  rspamd_mempool_t *pool,
-												  rspamd_shingles_filter filter,
-												  gpointer filterd,
-												  enum rspamd_shingle_alg alg);
+                                                  const unsigned char key[16],
+                                                  rspamd_mempool_t *pool,
+                                                  rspamd_shingles_filter filter,
+                                                  gpointer filterd,
+                                                  enum rspamd_shingle_alg alg,
+                                                  const char **categories);
 
 /**
  * Compares two shingles and return result as a floating point value - 1.0
@@ -86,13 +93,13 @@ struct rspamd_shingle *rspamd_shingles_from_image(unsigned char *dct,
  * @return
  */
 double rspamd_shingles_compare(const struct rspamd_shingle *a,
-							   const struct rspamd_shingle *b);
+                               const struct rspamd_shingle *b);
 
 /**
  * Default filtering function
  */
 uint64_t rspamd_shingles_default_filter(uint64_t *input, gsize count,
-										int shno, const unsigned char *key, gpointer ud);
+                                        int shno, const unsigned char *key, gpointer ud);
 
 #ifdef __cplusplus
 }
