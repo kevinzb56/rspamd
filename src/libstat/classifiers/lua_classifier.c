@@ -127,111 +127,116 @@ lua_classifier_init(struct rspamd_config *cfg,
 }
 gboolean
 lua_classifier_classify(struct rspamd_classifier *cl,
-						GPtrArray *tokens,
-						struct rspamd_task *task)
+                                                GPtrArray *tokens,
+                                                struct rspamd_task *task)
 {
-	struct rspamd_lua_classifier_ctx *ctx;
-	struct rspamd_task **ptask;
-	struct rspamd_classifier_config **pcfg;
-	lua_State *L;
-	rspamd_token_t *tok;
-	unsigned int i;
-	uint64_t v;
+    struct rspamd_lua_classifier_ctx *ctx;
+    struct rspamd_task **ptask;
+    struct rspamd_classifier_config **pcfg;
+    lua_State *L;
+    rspamd_token_t *tok;
+    unsigned int i;
+    uint64_t v;
 
-	ctx = g_hash_table_lookup(lua_classifiers, cl->subrs->name);
-	g_assert(ctx != NULL);
-	L = task->cfg->lua_state;
+    ctx = g_hash_table_lookup(lua_classifiers, cl->subrs->name);
+    g_assert(ctx != NULL);
+    L = task->cfg->lua_state;
 
-	lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->classify_ref);
-	ptask = lua_newuserdata(L, sizeof(*ptask));
-	*ptask = task;
-	rspamd_lua_setclass(L, rspamd_task_classname, -1);
-	pcfg = lua_newuserdata(L, sizeof(*pcfg));
-	*pcfg = cl->cfg;
-	rspamd_lua_setclass(L, rspamd_classifier_classname, -1);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->classify_ref);
+    ptask = lua_newuserdata(L, sizeof(*ptask));
+    *ptask = task;
+    rspamd_lua_setclass(L, rspamd_task_classname, -1);
+    pcfg = lua_newuserdata(L, sizeof(*pcfg));
+    *pcfg = cl->cfg;
+    rspamd_lua_setclass(L, rspamd_classifier_classname, -1);
 
-	lua_createtable(L, tokens->len, 0);
+    lua_createtable(L, tokens->len, 0);
 
-	for (i = 0; i < tokens->len; i++) {
-		tok = g_ptr_array_index(tokens, i);
-		v = tok->data;
-		lua_createtable(L, 3, 0);
-		/* High word, low word, order */
-		lua_pushinteger(L, (uint32_t) (v >> 32));
-		lua_rawseti(L, -2, 1);
-		lua_pushinteger(L, (uint32_t) (v));
-		lua_rawseti(L, -2, 2);
-		lua_pushinteger(L, tok->window_idx);
-		lua_rawseti(L, -2, 3);
-		lua_rawseti(L, -2, i + 1);
-	}
+    for (i = 0; i < tokens->len; i++) {
+        tok = g_ptr_array_index(tokens, i);
+        v = tok->data;
+        lua_createtable(L, 3, 0);
+        /* High word, low word, order */
+        lua_pushinteger(L, (uint32_t) (v >> 32));
+        lua_rawseti(L, -2, 1);
+        lua_pushinteger(L, (uint32_t) (v));
+        lua_rawseti(L, -2, 2);
+        lua_pushinteger(L, tok->window_idx);
+        lua_rawseti(L, -2, 3);
+        lua_rawseti(L, -2, i + 1);
+    }
 
-	if (lua_pcall(L, 3, 0, 0) != 0) {
-		msg_err_luacl("error running classify function for %s: %s", ctx->name,
-					  lua_tostring(L, -1));
-		lua_pop(L, 1);
+    if (lua_pcall(L, 3, 1, 0) != 0) {
+        msg_err_luacl("error running classify function for %s: %s", ctx->name,
+                      lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return FALSE;
+    }
 
-		return FALSE;
-	}
+    /* Retrieve classification result */
+    if (lua_type(L, -1) == LUA_TSTRING) {
+        const char *category = lua_tostring(L, -1);
+        msg_info_luacl("Email classified as: %s", category);
+        task->result = g_strdup(category);
+    }
+    lua_pop(L, 1);
 
-	return TRUE;
+    return TRUE;
 }
 
+/* Modified learning function to support multi-class */
 gboolean
 lua_classifier_learn_spam(struct rspamd_classifier *cl,
-						  GPtrArray *tokens,
-						  struct rspamd_task *task,
-						  gboolean is_spam,
-						  gboolean unlearn,
-						  GError **err)
+                                                  GPtrArray *tokens,
+                                                  struct rspamd_task *task,
+                                                  const char *category, /* Instead of boolean spam */
+                                                  gboolean unlearn,
+                                                  GError **err)
 {
-	struct rspamd_lua_classifier_ctx *ctx;
-	struct rspamd_task **ptask;
-	struct rspamd_classifier_config **pcfg;
-	lua_State *L;
-	rspamd_token_t *tok;
-	unsigned int i;
-	uint64_t v;
+    struct rspamd_lua_classifier_ctx *ctx;
+    struct rspamd_task **ptask;
+    struct rspamd_classifier_config **pcfg;
+    lua_State *L;
+    rspamd_token_t *tok;
+    unsigned int i;
+    uint64_t v;
 
-	ctx = g_hash_table_lookup(lua_classifiers, cl->subrs->name);
-	g_assert(ctx != NULL);
-	L = task->cfg->lua_state;
+    ctx = g_hash_table_lookup(lua_classifiers, cl->subrs->name);
+    g_assert(ctx != NULL);
+    L = task->cfg->lua_state;
 
-	lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->learn_ref);
-	ptask = lua_newuserdata(L, sizeof(*ptask));
-	*ptask = task;
-	rspamd_lua_setclass(L, rspamd_task_classname, -1);
-	pcfg = lua_newuserdata(L, sizeof(*pcfg));
-	*pcfg = cl->cfg;
-	rspamd_lua_setclass(L, rspamd_classifier_classname, -1);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ctx->learn_ref);
+    ptask = lua_newuserdata(L, sizeof(*ptask));
+    *ptask = task;
+    rspamd_lua_setclass(L, rspamd_task_classname, -1);
+    pcfg = lua_newuserdata(L, sizeof(*pcfg));
+    *pcfg = cl->cfg;
+    rspamd_lua_setclass(L, rspamd_classifier_classname, -1);
 
-	lua_createtable(L, tokens->len, 0);
+    lua_createtable(L, tokens->len, 0);
 
-	for (i = 0; i < tokens->len; i++) {
-		tok = g_ptr_array_index(tokens, i);
-		v = 0;
-		v = tok->data;
-		lua_createtable(L, 3, 0);
-		/* High word, low word, order */
-		lua_pushinteger(L, (uint32_t) (v >> 32));
-		lua_rawseti(L, -2, 1);
-		lua_pushinteger(L, (uint32_t) (v));
-		lua_rawseti(L, -2, 2);
-		lua_pushinteger(L, tok->window_idx);
-		lua_rawseti(L, -2, 3);
-		lua_rawseti(L, -2, i + 1);
-	}
+    for (i = 0; i < tokens->len; i++) {
+        tok = g_ptr_array_index(tokens, i);
+        v = tok->data;
+        lua_createtable(L, 3, 0);
+        lua_pushinteger(L, (uint32_t) (v >> 32));
+        lua_rawseti(L, -2, 1);
+        lua_pushinteger(L, (uint32_t) (v));
+        lua_rawseti(L, -2, 2);
+        lua_pushinteger(L, tok->window_idx);
+        lua_rawseti(L, -2, 3);
+        lua_rawseti(L, -2, i + 1);
+    }
 
-	lua_pushboolean(L, is_spam);
-	lua_pushboolean(L, unlearn);
+    lua_pushstring(L, category); /* Pass category instead of binary spam */
+    lua_pushboolean(L, unlearn);
 
-	if (lua_pcall(L, 5, 0, 0) != 0) {
-		msg_err_luacl("error running learn function for %s: %s", ctx->name,
-					  lua_tostring(L, -1));
-		lua_pop(L, 1);
+    if (lua_pcall(L, 5, 0, 0) != 0) {
+        msg_err_luacl("error running learn function for %s: %s", ctx->name,
+                      lua_tostring(L, -1));
+        lua_pop(L, 1);
+        return FALSE;
+    }
 
-		return FALSE;
-	}
-
-	return TRUE;
+    return TRUE;
 }
