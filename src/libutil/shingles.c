@@ -112,12 +112,13 @@ rspamd_shingles_get_keys_cached(const unsigned char key[SHINGLES_KEY_SIZE])
 }
 
 struct rspamd_shingle *RSPAMD_OPTIMIZE("unroll-loops")
-	rspamd_shingles_from_text(GArray *input,
-							  const unsigned char key[16],
-							  rspamd_mempool_t *pool,
-							  rspamd_shingles_filter filter,
-							  gpointer filterd,
-							  enum rspamd_shingle_alg alg)
+    rspamd_shingles_from_text(GArray *input,
+                              const unsigned char key[16],
+                              rspamd_mempool_t *pool,
+                              rspamd_shingles_filter filter,
+                              gpointer filterd,
+                              enum rspamd_shingle_alg alg,
+                              const char **categories)
 {
 	struct rspamd_shingle *res;
 	uint64_t **hashes;
@@ -129,17 +130,20 @@ struct rspamd_shingle *RSPAMD_OPTIMIZE("unroll-loops")
 	gsize hlen, ilen = 0, beg = 0, widx = 0;
 	enum rspamd_cryptobox_fast_hash_type ht;
 
-	if (pool != NULL) {
-		res = rspamd_mempool_alloc(pool, sizeof(*res));
-	}
-	else {
-		res = g_malloc(sizeof(*res));
-	}
+    if (pool != NULL) {
+        res = rspamd_mempool_alloc(pool, sizeof(*res));
+    }
+    else {
+        res = g_malloc(sizeof(*res));
+    }
 
-	row = rspamd_fstring_sized_new(256);
+    /* Initialize categories to NULL */
+    memset(res->categories, 0, sizeof(res->categories));
 
-	for (i = 0; i < input->len; i++) {
-		word = &g_array_index(input, rspamd_stat_token_t, i);
+    row = rspamd_fstring_sized_new(256);
+
+    for (i = 0; i < input->len; i++) {
+        word = &g_array_index(input, rspamd_stat_token_t, i);
 
 		if (!((word->flags & RSPAMD_STAT_TOKEN_FLAG_SKIPPED) || word->stemmed.len == 0)) {
 			ilen++;
@@ -155,15 +159,23 @@ struct rspamd_shingle *RSPAMD_OPTIMIZE("unroll-loops")
 		hashes[i] = g_malloc(hlen * sizeof(uint64_t));
 	}
 
-	/* Now parse input words into a vector of hashes using rolling window */
-	if (alg == RSPAMD_SHINGLES_OLD) {
-		for (i = 0; i <= (int) ilen; i++) {
-			if (i - beg >= SHINGLES_WINDOW || i == (int) ilen) {
-				for (j = beg; j < i; j++) {
+    /* Populate categories if provided */
+    if (categories && pool) {
+        for (i = 0; i < RSPAMD_SHINGLE_SIZE && i < input->len; i++) {
+            if (categories[i]) {
+                res->categories[i] = rspamd_mempool_strdup(pool, categories[i]);
+            }
+        }
+    }
 
-					word = NULL;
-					while (widx < input->len) {
-						word = &g_array_index(input, rspamd_stat_token_t, widx);
+    /* Now parse input words into a vector of hashes using rolling window */
+    if (alg == RSPAMD_SHINGLES_OLD) {
+        for (i = 0; i <= (int)ilen; i++) {
+            if (i - beg >= SHINGLES_WINDOW || i == (int)ilen) {
+                for (j = beg; j < i; j++) {
+                    word = NULL;
+                    while (widx < input->len) {
+                        word = &g_array_index(input, rspamd_stat_token_t, widx);
 
 						if ((word->flags & RSPAMD_STAT_TOKEN_FLAG_SKIPPED) || word->stemmed.len == 0) {
 							widx++;
@@ -235,10 +247,9 @@ struct rspamd_shingle *RSPAMD_OPTIMIZE("unroll-loops")
 							window[j * SHINGLES_WINDOW + k + 1];
 					}
 
-					word = NULL;
-
-					while (widx < input->len) {
-						word = &g_array_index(input, rspamd_stat_token_t, widx);
+                    word = NULL;
+                    while (widx < input->len) {
+                        word = &g_array_index(input, rspamd_stat_token_t, widx);
 
 						if ((word->flags & RSPAMD_STAT_TOKEN_FLAG_SKIPPED) || word->stemmed.len == 0) {
 							widx++;
@@ -301,12 +312,13 @@ struct rspamd_shingle *RSPAMD_OPTIMIZE("unroll-loops")
 }
 
 struct rspamd_shingle *RSPAMD_OPTIMIZE("unroll-loops")
-	rspamd_shingles_from_image(unsigned char *dct,
-							   const unsigned char key[16],
-							   rspamd_mempool_t *pool,
-							   rspamd_shingles_filter filter,
-							   gpointer filterd,
-							   enum rspamd_shingle_alg alg)
+    rspamd_shingles_from_image(unsigned char *dct,
+                               const unsigned char key[16],
+                               rspamd_mempool_t *pool,
+                               rspamd_shingles_filter filter,
+                               gpointer filterd,
+                               enum rspamd_shingle_alg alg,
+                               const char **categories)
 {
 	struct rspamd_shingle *shingle;
 	uint64_t **hashes;
@@ -325,31 +337,43 @@ struct rspamd_shingle *RSPAMD_OPTIMIZE("unroll-loops")
 		shingle = g_malloc(sizeof(*shingle));
 	}
 
-	/* Init hashes pipes and keys */
-	hashes = g_malloc(sizeof(*hashes) * RSPAMD_SHINGLE_SIZE);
-	hlen = RSPAMD_DCT_LEN / NBBY + 1;
-	keys = rspamd_shingles_get_keys_cached(key);
+    /* Initialize categories to NULL */
+    memset(shingle->categories, 0, sizeof(shingle->categories));
+
+    /* Init hashes pipes and keys */
+    hashes = g_malloc(sizeof(*hashes) * RSPAMD_SHINGLE_SIZE);
+    hlen = RSPAMD_DCT_LEN / NBBY + 1;
+    keys = rspamd_shingles_get_keys_cached(key);
 
 	for (i = 0; i < RSPAMD_SHINGLE_SIZE; i++) {
 		hashes[i] = g_malloc(hlen * sizeof(uint64_t));
 	}
 
-	switch (alg) {
-	case RSPAMD_SHINGLES_OLD:
-		ht = RSPAMD_CRYPTOBOX_MUMHASH;
-		break;
-	case RSPAMD_SHINGLES_XXHASH:
-		ht = RSPAMD_CRYPTOBOX_XXHASH64;
-		break;
-	case RSPAMD_SHINGLES_MUMHASH:
-		ht = RSPAMD_CRYPTOBOX_MUMHASH;
-		break;
-	default:
-		ht = RSPAMD_CRYPTOBOX_HASHFAST_INDEPENDENT;
-		break;
-	}
+    /* Populate categories if provided */
+    if (categories && pool) {
+        for (i = 0; i < RSPAMD_SHINGLE_SIZE; i++) {
+            if (categories[i]) {
+                shingle->categories[i] = rspamd_mempool_strdup(pool, categories[i]);
+            }
+        }
+    }
 
-	memset(res, 0, sizeof(res));
+    switch (alg) {
+    case RSPAMD_SHINGLES_OLD:
+        ht = RSPAMD_CRYPTOBOX_MUMHASH;
+        break;
+    case RSPAMD_SHINGLES_XXHASH:
+        ht = RSPAMD_CRYPTOBOX_XXHASH64;
+        break;
+    case RSPAMD_SHINGLES_MUMHASH:
+        ht = RSPAMD_CRYPTOBOX_MUMHASH;
+        break;
+    default:
+        ht = RSPAMD_CRYPTOBOX_HASHFAST_INDEPENDENT;
+        break;
+    }
+
+    memset(res, 0, sizeof(res));
 #define INNER_CYCLE_SHINGLES(s, e)                               \
 	for (j = (s); j < (e); j++) {                                \
 		d = dct[beg];                                            \
