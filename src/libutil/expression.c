@@ -33,7 +33,8 @@
 enum rspamd_expression_elt_type {
 	ELT_OP = 0,
 	ELT_ATOM,
-	ELT_LIMIT
+	ELT_LIMIT,
+	ELT_CLASS  /* New: Class identifier for multiclass */
 };
 
 enum rspamd_expression_op_flag {
@@ -43,6 +44,18 @@ enum rspamd_expression_op_flag {
 	RSPAMD_EXPRESSION_ARITHMETIC = 1u << 3u,
 	RSPAMD_EXPRESSION_LOGICAL = 1u << 4u,
 	RSPAMD_EXPRESSION_COMPARISON = 1u << 5u,
+};
+
+/* New: Structure to hold multiclass results */
+struct rspamd_expression_result {
+	enum {
+		RSPAMD_RESULT_DOUBLE,
+		RSPAMD_RESULT_STRING  /* New: For class labels */
+	} type;
+	union {
+		double dval;
+		char *sval;  /* New: String value for class labels */
+	} value;
 };
 
 struct rspamd_expression_operation {
@@ -57,11 +70,12 @@ struct rspamd_expression_elt {
 		rspamd_expression_atom_t *atom;
 		struct rspamd_expression_operation op;
 		double lim;
+		char *class_name;  /* New: Class label as string */
 	} p;
 
 	int flags;
 	int priority;
-	double value;
+	struct rspamd_expression_result value;  /* Updated: Supports multiclass */
 };
 
 struct rspamd_expression {
@@ -158,6 +172,9 @@ rspamd_expr_op_to_str(enum rspamd_expression_op op)
 		break;
 	case OP_CBRACE:
 		op_str = ")";
+		break;
+	case OP_SELECT:  /* New: Ternary operator for multiclass */
+		op_str = "select";
 		break;
 	default:
 		op_str = "???";
@@ -259,6 +276,7 @@ rspamd_expr_logic_priority(enum rspamd_expression_op op)
 		ret = 3;
 		break;
 	case OP_OR:
+	case OP_SELECT:  /* New: Same priority as OR */
 		ret = 2;
 		break;
 	case OP_OBRACE:
@@ -308,6 +326,9 @@ rspamd_expr_op_flags(enum rspamd_expression_op op)
 	case OP_AND:
 	case OP_OR:
 		ret |= RSPAMD_EXPRESSION_NARY | RSPAMD_EXPRESSION_LOGICAL;
+		break;
+	case OP_SELECT:  /* New: Ternary operator (condition, true_val, false_val) */
+		ret |= RSPAMD_EXPRESSION_NARY;
 		break;
 	case OP_OBRACE:
 	case OP_CBRACE:
@@ -507,6 +528,14 @@ rspamd_expr_str_to_op(const char *a, const char *end, const char **next)
 			op = OP_NOT;
 		}
 		break;
+	case 'S':
+	case 's':
+		if ((gulong) (end - a) >= sizeof("select") &&
+			g_ascii_strncasecmp(a, "select", sizeof("select") - 1) == 0) {  /* New: Parse 'select' */
+			*next = a + sizeof("select") - 1;
+			op = OP_SELECT;
+		}
+		break;
 	case '>':
 		if (a < end - 1 && a[1] == '=') {
 			*next = a + 2;
@@ -552,6 +581,10 @@ rspamd_expression_destroy(struct rspamd_expression *expr)
 				if (elt->type == ELT_ATOM) {
 					expr->subr->destroy(elt->p.atom);
 				}
+				/* New: Free class names if allocated */
+				else if (elt->type == ELT_CLASS && elt->p.class_name) {
+					g_free(elt->p.class_name);
+				}
 			}
 		}
 
@@ -578,7 +611,6 @@ rspamd_ast_add_node(struct rspamd_expression *e,
 					struct rspamd_expression_elt *op,
 					GError **err)
 {
-
 	GNode *res, *a1, *a2, *test;
 
 	g_assert(op->type == ELT_OP);
@@ -634,8 +666,21 @@ rspamd_ast_add_node(struct rspamd_expression *e,
 			return FALSE;
 		}
 
+		/* New: Special handling for OP_SELECT (ternary operator) */
+		if (op->p.op.op == OP_SELECT) {
+			GNode *a3 = rspamd_expr_stack_elt_pop(operands);
+			if (a3 == NULL) {
+				g_set_error(err, rspamd_expr_quark(), EINVAL, "no condition operand to "
+															  "'select' operation");
+				return FALSE;
+			}
+			res = g_node_new(op);
+			g_node_append(res, a3);  /* Condition */
+			g_node_append(res, a1);  /* True value */
+			g_node_append(res, a2);  /* False value */
+		}
 		/* Nary stuff */
-		if (op->p.op.op_flags & RSPAMD_EXPRESSION_NARY) {
+		else if (op->p.op.op_flags & RSPAMD_EXPRESSION_NARY) {
 			/*
 			 * We convert a set of ops like X + Y + Z to a nary tree like
 			 * X Y Z +
@@ -671,12 +716,18 @@ rspamd_ast_add_node(struct rspamd_expression *e,
 
 				return TRUE;
 			}
-		}
 
-		/* No optimizations possible, so create a new level */
-		res = g_node_new(op);
-		g_node_append(res, a1);
-		g_node_append(res, a2);
+			/* No optimizations possible, so create a new level */
+			res = g_node_new(op);
+			g_node_append(res, a1);
+			g_node_append(res, a2);
+		}
+		else {
+			/* Binary operator */
+			res = g_node_new(op);
+			g_node_append(res, a1);
+			g_node_append(res, a2);
+		}
 
 		e1 = a1->data;
 		e2 = a2->data;
@@ -730,8 +781,8 @@ rspamd_ast_priority_traverse(GNode *node, gpointer d)
 		/* It is atom or limit */
 		g_assert(elt->type != ELT_OP);
 
-		if (elt->type == ELT_LIMIT) {
-			/* Always push limit first */
+		if (elt->type == ELT_LIMIT || elt->type == ELT_CLASS) {  /* Updated: Include ELT_CLASS */
+			/* Always push limit/class first */
 			elt->priority = 0;
 		}
 		else {
@@ -756,10 +807,10 @@ rspamd_ast_priority_cmp(GNode *a, GNode *b)
 	struct rspamd_expression_elt *ea = a->data, *eb = b->data;
 	double w1, w2;
 
-	if (ea->type == ELT_LIMIT) {
+	if (ea->type == ELT_LIMIT || ea->type == ELT_CLASS) {  /* Updated: Include ELT_CLASS */
 		return 1;
 	}
-	else if (eb->type == ELT_LIMIT) {
+	else if (eb->type == ELT_LIMIT || eb->type == ELT_CLASS) {
 		return -1;
 	}
 
@@ -815,6 +866,11 @@ rspamd_expr_dup_elt(rspamd_mempool_t *pool, struct rspamd_expression_elt *elt)
 	n = rspamd_mempool_alloc(pool, sizeof(*n));
 	memcpy(n, elt, sizeof(*n));
 
+	/* New: Duplicate class_name if present */
+	if (elt->type == ELT_CLASS && elt->p.class_name) {
+		n->p.class_name = rspamd_mempool_strdup(pool, elt->p.class_name);
+	}
+
 	return n;
 }
 
@@ -837,6 +893,7 @@ rspamd_parse_expression(const char *line, gsize len,
 		PARSE_ATOM = 0,
 		PARSE_OP,
 		PARSE_LIM,
+		PARSE_CLASS,  /* New: Parse class identifiers */
 		SKIP_SPACES
 	} state = PARSE_ATOM;
 
@@ -902,12 +959,12 @@ rspamd_parse_expression(const char *line, gsize len,
 			else {
 				/*
 				 * If we have any comparison or arithmetic operator in the stack, then try
-				 * to parse limit
+				 * to parse limit or class
 				 */
 				op = GPOINTER_TO_INT(rspamd_expr_stack_peek(e));
 
 				if (op == OP_MULT || op == OP_MINUS || op == OP_DIVIDE ||
-					op == OP_PLUS || (op >= OP_LT && op <= OP_NE)) {
+					op == OP_PLUS || (op >= OP_LT && op <= OP_NE) || op == OP_SELECT) {  /* Updated: Include OP_SELECT */
 					if (rspamd_regexp_search(num_re,
 											 p,
 											 end - p,
@@ -917,6 +974,23 @@ rspamd_parse_expression(const char *line, gsize len,
 											 NULL)) {
 						c = p;
 						state = PARSE_LIM;
+						continue;
+					}
+					/* New: Check for class names (e.g., "finance", "personal") */
+					const char *class_start = p;
+					while (p < end && (g_ascii_isalnum(*p) || *p == '_')) {
+						p++;
+					}
+					if (p > class_start) {
+						elt.type = ELT_CLASS;
+						elt.p.class_name = rspamd_mempool_alloc(pool, p - class_start + 1);
+						memcpy(elt.p.class_name, class_start, p - class_start);
+						elt.p.class_name[p - class_start] = '\0';
+						g_array_append_val(e->expressions, elt);
+						rspamd_expr_stack_elt_push(operand_stack,
+												   g_node_new(rspamd_expr_dup_elt(pool, &elt)));
+						msg_debug_expression("found class: %s; pushed onto operand stack", elt.p.class_name);
+						state = SKIP_SPACES;
 						continue;
 					}
 					/* Fallback to atom parsing */
@@ -1201,21 +1275,26 @@ error_label:
  *  Node optimizer function: skip nodes that are not relevant
  */
 static gboolean
-rspamd_ast_node_done(struct rspamd_expression_elt *elt, double acc)
+rspamd_ast_node_done(struct rspamd_expression_elt *elt, struct rspamd_expression_result acc)
 {
 	gboolean ret = FALSE;
 
 	g_assert(elt->type == ELT_OP);
+
+	/* New: Only optimize if result is a double */
+	if (acc.type != RSPAMD_RESULT_DOUBLE) {
+		return FALSE;
+	}
 
 	switch (elt->p.op.op) {
 	case OP_NOT:
 		ret = TRUE;
 		break;
 	case OP_AND:
-		ret = acc == 0;
+		ret = acc.value.dval == 0;
 		break;
 	case OP_OR:
-		ret = acc != 0;
+		ret = acc.value.dval != 0;
 		break;
 	default:
 		break;
@@ -1225,15 +1304,22 @@ rspamd_ast_node_done(struct rspamd_expression_elt *elt, double acc)
 }
 
 
-static double
-rspamd_ast_do_unary_op(struct rspamd_expression_elt *elt, double operand)
+static struct rspamd_expression_result  /* Updated: Return structured result */
+rspamd_ast_do_unary_op(struct rspamd_expression_elt *elt, struct rspamd_expression_result operand)
 {
-	double ret;
+	struct rspamd_expression_result ret = {.type = RSPAMD_RESULT_DOUBLE};  /* Default to double */
 	g_assert(elt->type == ELT_OP);
+
+	/* New: Ensure operand is a double for logical ops */
+	if (operand.type != RSPAMD_RESULT_DOUBLE) {
+		msg_debug_expression("unary op %s expects numeric operand, got type %d",
+							 rspamd_expr_op_to_str(elt->p.op.op), operand.type);
+		return operand;  /* Pass through if type mismatch */
+	}
 
 	switch (elt->p.op.op) {
 	case OP_NOT:
-		ret = fabs(operand) > DBL_EPSILON ? 0.0 : 1.0;
+		ret.value.dval = fabs(operand.value.dval) > DBL_EPSILON ? 0.0 : 1.0;
 		break;
 	default:
 		g_assert_not_reached();
@@ -1242,37 +1328,44 @@ rspamd_ast_do_unary_op(struct rspamd_expression_elt *elt, double operand)
 	return ret;
 }
 
-static double
-rspamd_ast_do_binary_op(struct rspamd_expression_elt *elt, double op1, double op2)
+static struct rspamd_expression_result  /* Updated: Return structured result */
+rspamd_ast_do_binary_op(struct rspamd_expression_elt *elt, struct rspamd_expression_result op1, struct rspamd_expression_result op2)
 {
-	double ret;
+	struct rspamd_expression_result ret = {.type = RSPAMD_RESULT_DOUBLE};  /* Default to double */
 
 	g_assert(elt->type == ELT_OP);
 
+	/* New: Ensure operands are doubles for arithmetic/comparison */
+	if (op1.type != RSPAMD_RESULT_DOUBLE || op2.type != RSPAMD_RESULT_DOUBLE) {
+		msg_debug_expression("binary op %s expects numeric operands, got types %d, %d",
+							 rspamd_expr_op_to_str(elt->p.op.op), op1.type, op2.type);
+		return op1;  /* Pass through first operand if type mismatch */
+	}
+
 	switch (elt->p.op.op) {
 	case OP_MINUS:
-		ret = op1 - op2;
+		ret.value.dval = op1.value.dval - op2.value.dval;
 		break;
 	case OP_DIVIDE:
-		ret = op1 / op2;
+		ret.value.dval = op1.value.dval / op2.value.dval;
 		break;
 	case OP_GE:
-		ret = op1 >= op2;
+		ret.value.dval = op1.value.dval >= op2.value.dval;
 		break;
 	case OP_GT:
-		ret = op1 > op2;
+		ret.value.dval = op1.value.dval > op2.value.dval;
 		break;
 	case OP_LE:
-		ret = op1 <= op2;
+		ret.value.dval = op1.value.dval <= op2.value.dval;
 		break;
 	case OP_LT:
-		ret = op1 < op2;
+		ret.value.dval = op1.value.dval < op2.value.dval;
 		break;
 	case OP_EQ:
-		ret = op1 == op2;
+		ret.value.dval = op1.value.dval == op2.value.dval;
 		break;
 	case OP_NE:
-		ret = op1 != op2;
+		ret.value.dval = op1.value.dval != op2.value.dval;
 		break;
 
 	case OP_NOT:
@@ -1288,29 +1381,37 @@ rspamd_ast_do_binary_op(struct rspamd_expression_elt *elt, double op1, double op
 	return ret;
 }
 
-static double
-rspamd_ast_do_nary_op(struct rspamd_expression_elt *elt, double val, double acc)
+static struct rspamd_expression_result  /* Updated: Return structured result */
+rspamd_ast_do_nary_op(struct rspamd_expression_elt *elt, struct rspamd_expression_result val, struct rspamd_expression_result acc)
 {
-	double ret;
+	struct rspamd_expression_result ret = {.type = RSPAMD_RESULT_DOUBLE};  /* Default to double */
 
 	g_assert(elt->type == ELT_OP);
 
-	if (isnan(acc)) {
+	/* New: Handle type mismatches */
+	if (val.type != RSPAMD_RESULT_DOUBLE || 
+		(!isnan(acc.value.dval) && acc.type != RSPAMD_RESULT_DOUBLE)) {
+		msg_debug_expression("nary op %s expects numeric operands, got types %d, %d",
+							 rspamd_expr_op_to_str(elt->p.op.op), val.type, acc.type);
+		return val;  /* Pass through if type mismatch */
+	}
+
+	if (isnan(acc.value.dval)) {
 		return val;
 	}
 
 	switch (elt->p.op.op) {
 	case OP_PLUS:
-		ret = acc + val;
+		ret.value.dval = acc.value.dval + val.value.dval;
 		break;
 	case OP_MULT:
-		ret = acc * val;
+		ret.value.dval = acc.value.dval * val.value.dval;
 		break;
 	case OP_AND:
-		ret = (fabs(acc) > DBL_EPSILON) && (fabs(val) > DBL_EPSILON);
+		ret.value.dval = (fabs(acc.value.dval) > DBL_EPSILON) && (fabs(val.value.dval) > DBL_EPSILON);
 		break;
 	case OP_OR:
-		ret = (fabs(acc) > DBL_EPSILON) || (fabs(val) > DBL_EPSILON);
+		ret.value.dval = (fabs(acc.value.dval) > DBL_EPSILON) || (fabs(val.value.dval) > DBL_EPSILON);
 		break;
 	default:
 	case OP_NOT:
@@ -1329,15 +1430,15 @@ rspamd_ast_do_nary_op(struct rspamd_expression_elt *elt, double val, double acc)
 	return ret;
 }
 
-static double
+static struct rspamd_expression_result  /* Updated: Return structured result */
 rspamd_ast_process_node(struct rspamd_expression *e, GNode *node,
 						struct rspamd_expr_process_data *process_data)
 {
 	struct rspamd_expression_elt *elt;
 	GNode *cld;
-	double acc = NAN;
+	struct rspamd_expression_result acc = {.type = RSPAMD_RESULT_DOUBLE, .value.dval = NAN};  /* Updated */
 	float t1, t2;
-	double val;
+	struct rspamd_expression_result val;
 	gboolean calc_ticks = FALSE;
 	__attribute__((unused)) const char *op_name = NULL;
 
@@ -1354,9 +1455,11 @@ rspamd_ast_process_node(struct rspamd_expression *e, GNode *node,
 				t1 = rspamd_get_ticks(TRUE);
 			}
 
-			elt->value = process_data->process_closure(process_data->ud, elt->p.atom);
+			/* New: Assume process_closure returns a double; extend subr if needed */
+			elt->value.type = RSPAMD_RESULT_DOUBLE;
+			elt->value.value.dval = process_data->process_closure(process_data->ud, elt->p.atom);
 
-			if (fabs(elt->value) > DBL_EPSILON) {
+			if (fabs(elt->value.value.dval) > DBL_EPSILON) {
 				elt->p.atom->hits++;
 
 				if (process_data->trace) {
@@ -1373,12 +1476,17 @@ rspamd_ast_process_node(struct rspamd_expression *e, GNode *node,
 		}
 
 		acc = elt->value;
-		msg_debug_expression_verbose("atom: elt=%s; acc=%.1f", elt->p.atom->str, acc);
+		msg_debug_expression_verbose("atom: elt=%s; acc=%.1f", elt->p.atom->str, acc.value.dval);
 		break;
 	case ELT_LIMIT:
-
-		acc = elt->p.lim;
-		msg_debug_expression_verbose("limit: lim=%.1f; acc=%.1f;", elt->p.lim, acc);
+		acc.type = RSPAMD_RESULT_DOUBLE;
+		acc.value.dval = elt->p.lim;
+		msg_debug_expression_verbose("limit: lim=%.1f; acc=%.1f;", elt->p.lim, acc.value.dval);
+		break;
+	case ELT_CLASS:  /* New: Handle class elements */
+		acc.type = RSPAMD_RESULT_STRING;
+		acc.value.sval = elt->p.class_name;
+		msg_debug_expression_verbose("class: %s", elt->p.class_name);
 		break;
 	case ELT_OP:
 		g_assert(node->children != NULL);
@@ -1386,17 +1494,33 @@ rspamd_ast_process_node(struct rspamd_expression *e, GNode *node,
 		op_name = rspamd_expr_op_to_str(elt->p.op.op);
 #endif
 
-		if (elt->p.op.op_flags & RSPAMD_EXPRESSION_NARY) {
+		/* New: Handle OP_SELECT (ternary operator for multiclass) */
+		if (elt->p.op.op == OP_SELECT) {
+			GNode *cond = node->children;
+			GNode *true_val = cond->next;
+			GNode *false_val = true_val->next;
+			g_assert(false_val != NULL);
+
+			struct rspamd_expression_result cond_res = rspamd_ast_process_node(e, cond, process_data);
+			if (cond_res.type == RSPAMD_RESULT_DOUBLE && cond_res.value.dval > DBL_EPSILON) {
+				acc = rspamd_ast_process_node(e, true_val, process_data);
+			}
+			else {
+				acc = rspamd_ast_process_node(e, false_val, process_data);
+			}
+			msg_debug_expression_verbose("select op: %s; result type=%d", op_name, acc.type);
+		}
+		else if (elt->p.op.op_flags & RSPAMD_EXPRESSION_NARY) {
 			msg_debug_expression_verbose("proceed nary operation %s", op_name);
 			/* Proceed all ops in chain */
 			DL_FOREACH(node->children, cld)
 			{
 				val = rspamd_ast_process_node(e, cld, process_data);
 				msg_debug_expression_verbose("before op: op=%s; acc=%.1f; val = %.2f", op_name,
-											 acc, val);
+											 acc.value.dval, val.value.dval);
 				acc = rspamd_ast_do_nary_op(elt, val, acc);
 				msg_debug_expression_verbose("after op: op=%s; acc=%.1f; val = %.2f", op_name,
-											 acc, val);
+											 acc.value.dval, val.value.dval);
 
 				/* Check if we need to process further */
 				if (!(process_data->flags & RSPAMD_EXPRESSION_FLAG_NOOPT)) {
@@ -1412,7 +1536,7 @@ rspamd_ast_process_node(struct rspamd_expression *e, GNode *node,
 
 			c2 = c1->next;
 			g_assert(c2->next == NULL);
-			double val1, val2;
+			struct rspamd_expression_result val1, val2;
 
 			msg_debug_expression_verbose("proceed binary operation %s",
 										 op_name);
@@ -1420,10 +1544,10 @@ rspamd_ast_process_node(struct rspamd_expression *e, GNode *node,
 			val2 = rspamd_ast_process_node(e, c2, process_data);
 
 			msg_debug_expression_verbose("before op: op=%s; op1 = %.1f, op2 = %.1f",
-										 op_name, val1, val2);
+										 op_name, val1.value.dval, val2.value.dval);
 			acc = rspamd_ast_do_binary_op(elt, val1, val2);
 			msg_debug_expression_verbose("after op: op=%s; res=%.1f",
-										 op_name, acc);
+										 op_name, acc.value.dval);
 		}
 		else if (elt->p.op.op_flags & RSPAMD_EXPRESSION_UNARY) {
 			GNode *c1 = node->children;
@@ -1435,10 +1559,10 @@ rspamd_ast_process_node(struct rspamd_expression *e, GNode *node,
 			val = rspamd_ast_process_node(e, c1, process_data);
 
 			msg_debug_expression_verbose("before op: op=%s; op1 = %.1f",
-										 op_name, val);
+										 op_name, val.value.dval);
 			acc = rspamd_ast_do_unary_op(elt, val);
 			msg_debug_expression_verbose("after op: op=%s; res=%.1f",
-										 op_name, acc);
+										 op_name, acc.value.dval);
 		}
 		break;
 	}
@@ -1451,13 +1575,15 @@ rspamd_ast_cleanup_traverse(GNode *n, gpointer d)
 {
 	struct rspamd_expression_elt *elt = n->data;
 
-	elt->value = 0;
+	/* Updated: Reset to default double type */
+	elt->value.type = RSPAMD_RESULT_DOUBLE;
+	elt->value.value.dval = 0;
 	elt->flags = 0;
 
 	return FALSE;
 }
 
-double
+struct rspamd_expression_result  /* Updated: Return structured result */
 rspamd_process_expression_closure(struct rspamd_expression *expr,
 								  rspamd_expression_process_cb cb,
 								  int flags,
@@ -1465,7 +1591,7 @@ rspamd_process_expression_closure(struct rspamd_expression *expr,
 								  GPtrArray **track)
 {
 	struct rspamd_expr_process_data pd;
-	double ret = 0;
+	struct rspamd_expression_result ret;  /* Updated */
 
 	g_assert(expr != NULL);
 	/* Ensure that stack is empty at this point */
@@ -1505,7 +1631,7 @@ rspamd_process_expression_closure(struct rspamd_expression *expr,
 	return ret;
 }
 
-double
+struct rspamd_expression_result  /* Updated: Return structured result */
 rspamd_process_expression_track(struct rspamd_expression *expr,
 								int flags,
 								gpointer runtime_ud,
@@ -1515,7 +1641,7 @@ rspamd_process_expression_track(struct rspamd_expression *expr,
 											 expr->subr->process, flags, runtime_ud, track);
 }
 
-double
+struct rspamd_expression_result  /* Updated: Return structured result */
 rspamd_process_expression(struct rspamd_expression *expr,
 						  int flags,
 						  gpointer runtime_ud)
@@ -1544,6 +1670,9 @@ rspamd_ast_string_traverse(GNode *n, gpointer d)
 		else {
 			rspamd_printf_gstring(res, "%f", elt->p.lim);
 		}
+	}
+	else if (elt->type == ELT_CLASS) {  /* New: Stringify class elements */
+		rspamd_printf_gstring(res, "%s", elt->p.class_name);
 	}
 	else {
 		op_str = rspamd_expr_op_to_str(elt->p.op.op);
