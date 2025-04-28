@@ -94,8 +94,8 @@ inv_chi_square(struct rspamd_task *task, double value, int freedom_deg)
 }
 
 struct bayes_task_closure {
-	double ham_prob;
-	double spam_prob;
+	double *class_probs; /* Array of probabilities for each class */
+	unsigned int nclasses; /* Number of classes */
 	double meta_skip_prob;
 	uint64_t processed_tokens;
 	uint64_t total_hits;
@@ -119,12 +119,12 @@ bayes_classify_token(struct rspamd_classifier *ctx,
 {
 	unsigned int i;
 	int id;
-	unsigned int spam_count = 0, ham_count = 0, total_count = 0;
+	unsigned int total_count = 0;
+    double *class_counts, *class_freqs, *class_probs;
 	struct rspamd_statfile *st;
 	struct rspamd_task *task;
 	const char *token_type = "txt";
-	double spam_prob, spam_freq, ham_freq, bayes_spam_prob, bayes_ham_prob,
-		ham_prob, fw, w, val;
+	double fw, w, val;
 
 	task = cl->task;
 
@@ -151,6 +151,11 @@ bayes_classify_token(struct rspamd_classifier *ctx,
 		}
 	}
 
+	/* Allocate arrays for class-specific counts and probabilities */
+    class_counts = g_new0(double, ctx->statfiles_ids->len);
+    class_freqs = g_new0(double, ctx->statfiles_ids->len);
+    class_probs = g_new0(double, ctx->statfiles_ids->len);
+
 	for (i = 0; i < ctx->statfiles_ids->len; i++) {
 		id = g_array_index(ctx->statfiles_ids, int, i);
 		st = g_ptr_array_index(ctx->ctx->statfiles, id);
@@ -158,24 +163,26 @@ bayes_classify_token(struct rspamd_classifier *ctx,
 		val = tok->values[id];
 
 		if (val > 0) {
-			if (st->stcf->is_spam) {
-				spam_count += val;
-			}
-			else {
-				ham_count += val;
-			}
-
-			total_count += val;
-			cl->total_hits += val;
-		}
+            class_counts[i] += val;
+            total_count += val;
+            cl->total_hits += val;
+        }
 	}
 
 	/* Probability for this token */
 	if (total_count >= ctx->cfg->min_token_hits) {
-		spam_freq = ((double) spam_count / MAX(1., (double) ctx->spam_learns));
-		ham_freq = ((double) ham_count / MAX(1., (double) ctx->ham_learns));
-		spam_prob = spam_freq / (spam_freq + ham_freq);
-		ham_prob = ham_freq / (spam_freq + ham_freq);
+		double total_freq = 0.0;
+
+        for (i = 0; i < ctx->statfiles_ids->len; i++) {
+            id = g_array_index(ctx->statfiles_ids, int, i);
+            st = g_ptr_array_index(ctx->ctx->statfiles, id);
+            class_freqs[i] = class_counts[i] / MAX(1.0, (double)st->learns);
+            total_freq += class_freqs[i];
+        }
+
+		for (i = 0; i < ctx->statfiles_ids->len; i++) {
+            class_probs[i] = total_freq > 0 ? class_freqs[i] / total_freq : 0.5;
+        }
 
 		if (tok->flags & RSPAMD_STAT_TOKEN_FLAG_UNIGRAM) {
 			fw = 1.0;
@@ -188,24 +195,16 @@ bayes_classify_token(struct rspamd_classifier *ctx,
 
 		w = (fw * total_count) / (1.0 + fw * total_count);
 
-		bayes_spam_prob = PROB_COMBINE(spam_prob, total_count, w, 0.5);
+		for (i = 0; i < ctx->statfiles_ids->len; i++) {
+            double bayes_prob = PROB_COMBINE(class_probs[i], total_count, w, 0.5);
 
-		if ((bayes_spam_prob > 0.5 && bayes_spam_prob < 0.5 + ctx->cfg->min_prob_strength) ||
-			(bayes_spam_prob < 0.5 && bayes_spam_prob > 0.5 - ctx->cfg->min_prob_strength)) {
-			msg_debug_bayes(
-				"token %uL <%*s:%*s> skipped, probability not in range: %f",
-				tok->data,
-				(int) tok->t1->stemmed.len, tok->t1->stemmed.begin,
-				(int) tok->t2->stemmed.len, tok->t2->stemmed.begin,
-				bayes_spam_prob);
+            if ((bayes_prob > 0.5 && bayes_prob < 0.5 + ctx->cfg->min_prob_strength) ||
+                (bayes_prob < 0.5 && bayes_prob > 0.5 - ctx->cfg->min_prob_strength)) {
+                continue; /* Skip tokens with weak probabilities for this class */
+            }
 
-			return;
-		}
-
-		bayes_ham_prob = PROB_COMBINE(ham_prob, total_count, w, 0.5);
-
-		cl->spam_prob += log(bayes_spam_prob);
-		cl->ham_prob += log(bayes_ham_prob);
+            cl->class_probs[i] += log(bayes_prob);
+        }
 		cl->processed_tokens++;
 
 		if (!(tok->flags & RSPAMD_STAT_TOKEN_FLAG_META)) {
@@ -216,35 +215,33 @@ bayes_classify_token(struct rspamd_classifier *ctx,
 		}
 
 		if (tok->t1 && tok->t2) {
-			msg_debug_bayes("token(%s) %uL <%*s:%*s>: weight: %f, cf: %f, "
-							"total_count: %ud, "
-							"spam_count: %ud, ham_count: %ud,"
-							"spam_prob: %.3f, ham_prob: %.3f, "
-							"bayes_spam_prob: %.3f, bayes_ham_prob: %.3f, "
-							"current spam probability: %.3f, current ham probability: %.3f",
-							token_type,
-							tok->data,
-							(int) tok->t1->stemmed.len, tok->t1->stemmed.begin,
-							(int) tok->t2->stemmed.len, tok->t2->stemmed.begin,
-							fw, w, total_count, spam_count, ham_count,
-							spam_prob, ham_prob,
-							bayes_spam_prob, bayes_ham_prob,
-							cl->spam_prob, cl->ham_prob);
+            GString *prob_str = g_string_new(NULL);
+            for (i = 0; i < ctx->statfiles_ids->len; i++) {
+                id = g_array_index(ctx->statfiles_ids, int, i);
+                st = g_ptr_array_index(ctx->ctx->statfiles, id);
+                g_string_append_printf(prob_str, "%s: %.3f; ", st->stcf->symbol, class_probs[i]);
+            }
+            msg_debug_bayes("token(%s) %uL <%*s:%*s>: weight: %f, cf: %f, "
+                            "total_count: %ud, probs: %s",
+                            token_type, tok->data,
+                            (int) tok->t1->stemmed.len, tok->t1->stemmed.begin,
+                            (int) tok->t2->stemmed.len, tok->t2->stemmed.begin,
+                            fw, w, total_count, prob_str->str);
+            g_string_free(prob_str, TRUE);
 		}
 		else {
-			msg_debug_bayes("token(%s) %uL <?:?>: weight: %f, cf: %f, "
-							"total_count: %ud, "
-							"spam_count: %ud, ham_count: %ud,"
-							"spam_prob: %.3f, ham_prob: %.3f, "
-							"bayes_spam_prob: %.3f, bayes_ham_prob: %.3f, "
-							"current spam probability: %.3f, current ham probability: %.3f",
-							token_type,
-							tok->data,
-							fw, w, total_count, spam_count, ham_count,
-							spam_prob, ham_prob,
-							bayes_spam_prob, bayes_ham_prob,
-							cl->spam_prob, cl->ham_prob);
-		}
+            GString *prob_str = g_string_new(NULL);
+            for (i = 0; i < ctx->statfiles_ids->len; i++) {
+                id = g_array_index(ctx->statfiles_ids, int, i);
+                st = g_ptr_array_index(ctx->ctx->statfiles, id);
+                g_string_append_printf(prob_str, "%s: %.3f; ", st->stcf->symbol, class_probs[i]);
+            }
+            msg_debug_bayes("token(%s) %uL <?:?>: weight: %f, cf: %f, "
+                            "total_count: %ud, probs: %s",
+                            token_type, tok->data,
+                            fw, w, total_count, prob_str->str);
+            g_string_free(prob_str, TRUE);
+        }
 	}
 }
 
@@ -280,23 +277,22 @@ bayes_classify(struct rspamd_classifier *ctx,
 	g_assert(tokens != NULL);
 
 	memset(&cl, 0, sizeof(cl));
+	cl.nclasses = ctx->statfiles_ids->len;
+	cl.class_probs = g_new0(double, cl.nclasses);
 	cl.task = task;
 
 	/* Check min learns */
 	if (ctx->cfg->min_learns > 0) {
-		if (ctx->ham_learns < ctx->cfg->min_learns) {
-			msg_info_task("not classified as ham. The ham class needs more "
-						  "training samples. Currently: %ul; minimum %ud required",
-						  ctx->ham_learns, ctx->cfg->min_learns);
-
-			return TRUE;
-		}
-		if (ctx->spam_learns < ctx->cfg->min_learns) {
-			msg_info_task("not classified as spam. The spam class needs more "
-						  "training samples. Currently: %ul; minimum %ud required",
-						  ctx->spam_learns, ctx->cfg->min_learns);
-
-			return TRUE;
+		for (i = 0; i < ctx->statfiles_ids->len; i++) {
+			id = g_array_index(ctx->statfiles_ids, int, i);
+			st = g_ptr_array_index(ctx->ctx->statfiles, id);
+			if (st->learns < ctx->cfg->min_learns) {
+				msg_info_task("not classified for %s. The class needs more "
+							"training samples. Currently: %ul; minimum %ud required",
+							st->stcf->symbol, st->learns, ctx->cfg->min_learns);
+				g_free(cl.class_probs);
+				return TRUE;
+			}
 		}
 	}
 
