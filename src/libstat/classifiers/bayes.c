@@ -347,81 +347,82 @@ bayes_classify(struct rspamd_classifier *ctx,
 		return TRUE;
 	}
 
-	if (cl.spam_prob > -300 && cl.ham_prob > -300) {
-		/* Fisher value is low enough to apply inv_chi_square */
-		h = 1 - inv_chi_square(task, cl.spam_prob, cl.processed_tokens);
-		s = 1 - inv_chi_square(task, cl.ham_prob, cl.processed_tokens);
-	}
-	else {
-		/* Use naive method */
-		if (cl.spam_prob < cl.ham_prob) {
-			h = (1.0 - exp(cl.spam_prob - cl.ham_prob)) /
-				(1.0 + exp(cl.spam_prob - cl.ham_prob));
-			s = 1.0 - h;
-		}
-		else {
-			s = (1.0 - exp(cl.ham_prob - cl.spam_prob)) /
-				(1.0 + exp(cl.ham_prob - cl.spam_prob));
-			h = 1.0 - s;
-		}
-	}
+	double *class_scores = g_new0(double, ctx->statfiles_ids->len);
+    unsigned int max_class_idx = 0;
+    gboolean all_finite = TRUE;
 
-	if (isfinite(s) && isfinite(h)) {
-		final_prob = (s + 1.0 - h) / 2.;
-		msg_debug_bayes(
-			"got ham probability %.2f -> %.2f and spam probability %.2f -> %.2f,"
-			" %L tokens processed of %ud total tokens;"
-			" %uL text tokens found of %ud text tokens)",
-			cl.ham_prob,
-			h,
-			cl.spam_prob,
-			s,
-			cl.processed_tokens,
-			tokens->len,
-			cl.text_tokens,
-			text_tokens);
-	}
-	else {
-		/*
-		 * We have some overflow, hence we need to check which class
-		 * is NaN
-		 */
-		if (isfinite(h)) {
-			final_prob = 1.0;
-			msg_debug_bayes("spam class is full: no"
-							" ham samples");
-		}
-		else if (isfinite(s)) {
-			final_prob = 0.0;
-			msg_debug_bayes("ham class is full: no"
-							" spam samples");
-		}
-		else {
-			final_prob = 0.5;
-			msg_warn_bayes("spam and ham classes are both full");
-		}
-	}
+    for (i = 0; i < ctx->statfiles_ids->len; i++) {
+        if (cl.class_probs[i] > -300) {
+            class_scores[i] = 1 - inv_chi_square(task, cl.class_probs[i], cl.processed_tokens);
+        }
+        else {
+            class_scores[i] = exp(cl.class_probs[i]) / (1.0 + exp(cl.class_probs[i]));
+        }
+        if (!isfinite(class_scores[i])) {
+            all_finite = FALSE;
+        }
+        if (class_scores[i] > class_scores[max_class_idx]) {
+            max_class_idx = i;
+        }
+    }
+
+    GString *prob_str = g_string_new(NULL);
+    for (i = 0; i < ctx->statfiles_ids->len; i++) {
+        id = g_array_index(ctx->statfiles_ids, int, i);
+        st = g_ptr_array_index(ctx->ctx->statfiles, id);
+        g_string_append_printf(prob_str, "%s: %.2f; ", st->stcf->symbol, class_scores[i]);
+    }
+    msg_debug_bayes("class probabilities: %s, %L tokens processed of %ud total tokens; "
+                    "%uL text tokens found of %ud text tokens",
+                    prob_str->str, cl.processed_tokens, tokens->len, cl.text_tokens, text_tokens);
+    g_string_free(prob_str, TRUE);
+
+    /* Backward compatibility for binary classification */
+    if (ctx->statfiles_ids->len == 2 && all_finite) {
+        double h = class_scores[0];
+        double s = class_scores[1];
+        final_prob = (s + 1.0 - h) / 2.0;
+        max_class_idx = final_prob > 0.5 ? 1 : 0;
+    }
+    else if (all_finite) {
+        final_prob = class_scores[max_class_idx];
+    }
+    else {
+        /* Handle non-finite cases */
+        unsigned int finite_count = 0;
+        for (i = 0; i < ctx->statfiles_ids->len; i++) {
+            if (isfinite(class_scores[i])) {
+                finite_count++;
+                if (class_scores[i] > class_scores[max_class_idx]) {
+                    max_class_idx = i;
+                }
+            }
+        }
+        if (finite_count == 1) {
+            final_prob = isfinite(class_scores[max_class_idx]) ? 1.0 : 0.5;
+        }
+        else if (finite_count == 0) {
+            final_prob = 0.5;
+            msg_warn_bayes("all classes have non-finite probabilities");
+        }
+        else {
+            final_prob = class_scores[max_class_idx];
+        }
+    }
+
+    g_free(class_scores);
 
 	pprob = rspamd_mempool_alloc(task->task_pool, sizeof(*pprob));
 	*pprob = final_prob;
 	rspamd_mempool_set_variable(task->task_pool, "bayes_prob", pprob, NULL);
 
 	if (cl.processed_tokens > 0 && fabs(final_prob - 0.5) > 0.05) {
-		/* Now we can have exactly one HAM and exactly one SPAM statfiles per classifier */
-		for (i = 0; i < ctx->statfiles_ids->len; i++) {
-			id = g_array_index(ctx->statfiles_ids, int, i);
-			st = g_ptr_array_index(ctx->ctx->statfiles, id);
 
-			if (final_prob > 0.5 && st->stcf->is_spam) {
-				break;
-			}
-			else if (final_prob < 0.5 && !st->stcf->is_spam) {
-				break;
-			}
-		}
+		id = g_array_index(ctx->statfiles_ids, int, max_class_idx);
+		st = g_ptr_array_index(ctx->ctx->statfiles, id);
 
 		/* Correctly scale HAM */
-		if (final_prob < 0.5) {
+		if (ctx->statfiles_ids->len == 2 && !st->stcf->is_spam) {
 			final_prob = 1.0 - final_prob;
 		}
 
@@ -452,7 +453,7 @@ bayes_classify(struct rspamd_classifier *ctx,
 								  final_prob,
 								  sumbuf);
 	}
-
+	g_free(cl.class_probs);
 	return TRUE;
 }
 
@@ -542,6 +543,6 @@ bayes_learn_spam(struct rspamd_classifier *ctx,
 							tok->window_idx, total_cnt, spam_cnt, ham_cnt);
 		}
 	}
-
+	g_free(cl.class_probs);
 	return TRUE;
 }
