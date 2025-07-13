@@ -21,6 +21,7 @@ local lua_redis = require "lua_redis"
 local logger = require "rspamd_logger"
 local lua_util = require "lua_util"
 local ucl = require "ucl"
+local cmsgpack = require "cmsgpack"
 
 local N = "bayes"
 
@@ -39,6 +40,33 @@ local function gen_classify_functor(redis_params, classify_script_id)
     lua_redis.exec_redis_script(classify_script_id,
         { task = task, is_write = false, key = expanded_key },
         classify_redis_cb, { expanded_key, stat_tokens })
+  end
+end
+
+local function gen_classify_multiclass_functor(redis_params, classify_multi_script_id)
+  return function(task, expanded_key, categories, stat_tokens, callback)
+    local function classify_redis_cb(err, data)
+      lua_util.debugm(N, task, 'classify multi redis cb: %s, %s', err, data)
+      if err then
+        callback(task, false, err)
+      else
+        -- Result: first N are learned counts, next N are class outputs
+        local num_classes = #categories
+        local learned_counts, class_outputs = {}, {}
+        for i = 1, num_classes do
+          learned_counts[categories[i]] = data[i]
+        end
+        for i = 1, num_classes do
+          class_outputs[categories[i]] = data[num_classes + i]
+        end
+        callback(task, true, learned_counts, class_outputs)
+      end
+    end
+
+    local packed_categories = cmsgpack.pack(categories)
+    lua_redis.exec_redis_script(classify_multi_script_id,
+      { task = task, is_write = false, key = expanded_key },
+      classify_redis_cb, { expanded_key, stat_tokens, packed_categories })
   end
 end
 
@@ -173,6 +201,21 @@ exports.lua_bayes_init_statfile = function(classifier_ucl, statfile_ucl, symbol,
   end
 
   return gen_classify_functor(redis_params, classify_script_id), gen_learn_functor(redis_params, learn_script_id)
+end
+
+-- NEW: Multi-class classifier export
+--- Init multi-class bayes classifier
+--- @param classifier_ucl ucl of the classifier config
+--- @param statfile_ucl ucl of the statfile config
+--- @param categories array of user-defined categories
+--- @return a classify_functor or nil on error
+exports.lua_bayes_init_statfile_multiclass = function(classifier_ucl, statfile_ucl, categories)
+  local redis_params = load_redis_params(classifier_ucl, statfile_ucl)
+  if not redis_params then
+    return nil
+  end
+  local classify_multi_script_id = lua_redis.load_redis_script_from_file("bayes_classify_multi.lua", redis_params)
+  return gen_classify_multiclass_functor(redis_params, classify_multi_script_id)
 end
 
 local function gen_cache_check_functor(redis_params, check_script_id, conf)
