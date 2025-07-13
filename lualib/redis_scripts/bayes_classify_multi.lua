@@ -12,7 +12,7 @@ local output_classes = {}
 local learned_counts = {}
 
 -- Get learned counts for each class
-for i, class_name in ipairs(classes) do
+for _, class_name in ipairs(classes) do
   local learn_key = 'learns_' .. class_name
   learned_counts[class_name] = tonumber(redis.call('HGET', prefix, learn_key)) or 0
   output_classes[class_name] = {}
@@ -20,7 +20,7 @@ end
 
 -- Check if we have enough training data for all classes
 local has_sufficient_data = true
-for class_name, count in pairs(learned_counts) do
+for _, count in pairs(learned_counts) do
   if count <= 0 then
     has_sufficient_data = false
     break
@@ -36,7 +36,7 @@ if has_sufficient_data then
     for _, class_name in ipairs(classes) do
       table.insert(hmget_args, string.upper(string.sub(class_name, 1, 1))) -- Use first letter uppercase as key
     end
-    
+
     local token_data = redis.call('HMGET', token, unpack(hmget_args))
 
     if token_data then
