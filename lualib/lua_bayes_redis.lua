@@ -21,49 +21,41 @@ local lua_redis = require "lua_redis"
 local logger = require "rspamd_logger"
 local lua_util = require "lua_util"
 local ucl = require "ucl"
-local cmsgpack = require "cmsgpack"
 
 local N = "bayes"
 
-local function gen_classify_functor(redis_params, classify_script_id, classify_multi_script_id)
-  return function(task, expanded_key, stat_tokens, callback, categories)
-    if categories then
-      -- Multi-class logic
-      local function classify_redis_cb(err, data)
-        lua_util.debugm(N, task, 'classify multi redis cb: %s, %s', err, data)
-        if err then
-          callback(task, false, err)
-        else
-          -- Result: first N are learned counts, next N are class outputs
-          local num_classes = #categories
-          local learned_counts, class_outputs = {}, {}
-          for i = 1, num_classes do
-            learned_counts[categories[i]] = data[i]
-          end
-          for i = 1, num_classes do
-            class_outputs[categories[i]] = data[num_classes + i]
-          end
-          callback(task, true, learned_counts, class_outputs)
-        end
-      end
-      local packed_categories = cmsgpack.pack(categories)
-      lua_redis.exec_redis_script(classify_multi_script_id,
-        { task = task, is_write = false, key = expanded_key },
-        classify_redis_cb, { expanded_key, stat_tokens, packed_categories })
-    else
-      local function classify_redis_cb(err, data)
-        lua_util.debugm(N, task, 'classify redis cb: %s, %s', err, data)
-        if err then
-          callback(task, false, err)
-        else
-          callback(task, true, data[1], data[2], data[3], data[4])
-        end
-      end
+local function gen_classify_functor(redis_params, classify_script_id)
+  return function(task, expanded_key, id, is_spam, stat_tokens, callback)
 
-      lua_redis.exec_redis_script(classify_script_id,
+    local function classify_redis_cb(err, data)
+      lua_util.debugm(N, task, 'classify redis cb: %s, %s', err, data)
+      if err then
+        callback(task, false, err)
+      else
+        callback(task, true, data[1], data[2], data[3], data[4])
+      end
+    end
+
+    lua_redis.exec_redis_script(classify_script_id,
         { task = task, is_write = false, key = expanded_key },
         classify_redis_cb, { expanded_key, stat_tokens })
+  end
+end
+
+local function gen_classify_multi_functor(redis_params, classify_multi_script_id)
+  return function(task, expanded_key, id, category_list, stat_tokens, callback)
+    local function classify_multi_redis_cb(err, data)
+      lua_util.debugm(N, task, 'classify_multi redis cb: %s, %s', err, data)
+      if err then
+        callback(task, false, err)
+      else
+        callback(task, true, data[1], data[2], data[3], data[4])
+      end
     end
+
+    lua_redis.exec_redis_script(classify_multi_script_id,
+      { task = task, is_write = false, key = expanded_key },
+      classify_multi_redis_cb, { expanded_key, stat_tokens, category_list })
   end
 end
 
@@ -146,9 +138,9 @@ exports.lua_bayes_init_statfile = function(classifier_ucl, statfile_ucl, symbol,
   end
 
   local classify_script_id = lua_redis.load_redis_script_from_file("bayes_classify.lua", redis_params)
+  local classify_multi_script_id = lua_redis.load_redis_script_from_file("bayes_classify_multi.lua", redis_params)
   local learn_script_id = lua_redis.load_redis_script_from_file("bayes_learn.lua", redis_params)
   local stat_script_id = lua_redis.load_redis_script_from_file("bayes_stat.lua", redis_params)
-  local classify_multi_script_id = lua_redis.load_redis_script_from_file("bayes_classify_multi.lua", redis_params)
   local max_users = classifier_ucl.max_users or 1000
 
   local current_data = {
@@ -198,8 +190,7 @@ exports.lua_bayes_init_statfile = function(classifier_ucl, statfile_ucl, symbol,
     end)
   end
 
-  -- Unified classify functor f
-  return gen_classify_functor(redis_params, classify_script_id, classify_multi_script_id), gen_learn_functor(redis_params, learn_script_id)
+  return gen_classify_functor(redis_params, classify_script_id), gen_learn_functor(redis_params, learn_script_id)
 end
 
 local function gen_cache_check_functor(redis_params, check_script_id, conf)
