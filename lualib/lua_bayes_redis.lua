@@ -130,6 +130,22 @@ end
 --- @param statfile_ucl ucl of the statfile config
 --- @return a pair of (classify_functor, learn_functor) or `nil` in case of error
 exports.lua_bayes_init_statfile = function(classifier_ucl, statfile_ucl, symbol, is_spam, ev_base, stat_periodic_cb)
+  if classifier_ucl.is_multiclass then
+
+    local categories = {}
+    for _, sf in ipairs(statfile_ucl) do
+      if sf.category then
+        categories[sf.category] = {
+          symbol = sf.symbol,
+          spam = sf.spam or false
+        }
+      end
+    end
+
+    -- Hardcoded categories for now
+    categories["business"] = categories["business"] or {symbol = "BAYES_BUSINESS", spam = false}
+    categories["personal"] = categories["personal"] or {symbol = "BAYES_PERSONAL", spam = false}
+  end
 
   local redis_params = load_redis_params(classifier_ucl, statfile_ucl)
 
