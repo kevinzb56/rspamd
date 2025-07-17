@@ -137,14 +137,13 @@ exports.lua_bayes_init_statfile = function(classifier_ucl, statfile_ucl, symbol,
       if sf.category then
         categories[sf.category] = {
           symbol = sf.symbol,
-          spam = sf.spam or false
         }
       end
     end
 
     -- Hardcoded categories for now
-    categories["business"] = categories["business"] or {symbol = "BAYES_BUSINESS", spam = false}
-    categories["personal"] = categories["personal"] or {symbol = "BAYES_PERSONAL", spam = false}
+    categories["business"] = categories["business"] or {symbol = "BAYES_BUSINESS"}
+    categories["personal"] = categories["personal"] or {symbol = "BAYES_PERSONAL"}
   end
 
   local redis_params = load_redis_params(classifier_ucl, statfile_ucl)
