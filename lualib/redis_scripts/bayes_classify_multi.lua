@@ -6,7 +6,8 @@
 
 local prefix = KEYS[1]
 local input_tokens = cmsgpack.unpack(KEYS[2])
-local classes = cmsgpack.unpack(KEYS[3])
+-- local classes = cmsgpack.unpack(KEYS[3])
+local classes = {'Business', 'Promotional'}
 
 local output_classes = {}
 local learned_counts = {}

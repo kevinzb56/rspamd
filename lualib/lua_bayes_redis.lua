@@ -21,6 +21,7 @@ local lua_redis = require "lua_redis"
 local logger = require "rspamd_logger"
 local lua_util = require "lua_util"
 local ucl = require "ucl"
+local category_list = {'Business', 'Personal'}
 
 local N = "bayes"
 
