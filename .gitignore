@@ -4,6 +4,7 @@ node_modules/
 .idea
 # Added by CLion
 cmake-build-debug/
+build/
 # Logs and databases #
 ######################
 *.log

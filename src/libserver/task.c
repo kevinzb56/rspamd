@@ -937,6 +937,43 @@ rspamd_learn_task_spam(struct rspamd_task *task,
 	return TRUE;
 }
 
+gboolean
+rspamd_learn_task_class(struct rspamd_task *task,
+					   const char *class_name,
+					   const char *classifier,
+					   GError **err)
+{
+	gboolean is_spam;
+	
+	/* Disable learn auto flag to avoid bad learn codes */
+	task->flags &= ~RSPAMD_TASK_FLAG_LEARN_AUTO;
+	
+	/* Store class name for future use */
+	task->learn_class = class_name;
+	task->classifier = classifier;
+	
+	/* Map to spam/ham for backward compatibility */
+	if (g_ascii_strcasecmp(class_name, "spam") == 0) {
+		task->flags |= RSPAMD_TASK_FLAG_LEARN_SPAM;
+	}
+	else if (g_ascii_strcasecmp(class_name, "ham") == 0) {
+		task->flags |= RSPAMD_TASK_FLAG_LEARN_HAM;
+	}
+	else {
+		/* For now, only spam and ham are supported */
+		if (err) {
+			*err = g_error_new(g_quark_from_static_string("learn"),
+							 400,
+							 "Unknown class '%s'. Currently only 'spam' and 'ham' are supported.",
+							 class_name);
+		}
+		return FALSE;
+	}
+	
+	return TRUE;
+}
+
+
 static gboolean
 rspamd_task_log_check_condition(struct rspamd_task *task,
 								struct rspamd_log_format *lf)

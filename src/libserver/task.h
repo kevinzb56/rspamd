@@ -218,6 +218,7 @@ struct rspamd_task {
 	struct rspamd_config_settings_elt *settings_elt; /**< preprocessed settings id elt				*/
 
 	const char *classifier;                /**< Classifier to learn (if needed)				*/
+	const char *learn_class;               /**< Class name for multi-class learning			*/
 	struct rspamd_lang_detector *lang_det; /**< Languages detector								*/
 	struct rspamd_message *message;
 };
@@ -296,6 +297,19 @@ gboolean rspamd_task_add_recipient(struct rspamd_task *task, const char *rcpt);
  */
 gboolean rspamd_learn_task_spam(struct rspamd_task *task,
 								gboolean is_spam,
+								const char *classifier,
+								GError **err);
+
+/**
+ * Learn task for a specific class (multi-class classification)
+ * @param task task to learn
+ * @param class_name name of the class to learn
+ * @param classifier classifier to use (NULL for all)
+ * @param err pointer to GError
+ * @return true if learn succeed
+ */
+gboolean rspamd_learn_task_class(struct rspamd_task *task,
+								const char *class_name,
 								const char *classifier,
 								GError **err);
 

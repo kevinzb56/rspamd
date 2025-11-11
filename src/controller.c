@@ -53,6 +53,7 @@
 #define PATH_HISTORY_RESET "/historyreset"
 #define PATH_LEARN_SPAM "/learnspam"
 #define PATH_LEARN_HAM "/learnham"
+#define PATH_LEARN "/learn"
 #define PATH_METRICS "/metrics"
 #define PATH_READY "/ready"
 #define PATH_SAVE_ACTIONS "/saveactions"
@@ -2212,6 +2213,104 @@ rspamd_controller_handle_learnham(
 }
 
 /*
+ * Learn with class command handler:
+ * request: /learn
+ * headers: Password, Class
+ * input: plaintext data
+ * reply: json {"success":true} or {"error":"error message"}
+ */
+static int
+rspamd_controller_handle_learn(
+	struct rspamd_http_connection_entry *conn_ent,
+	struct rspamd_http_message *msg)
+{
+	struct rspamd_controller_session *session = conn_ent->ud;
+	struct rspamd_controller_worker_ctx *ctx;
+	struct rspamd_task *task;
+	const rspamd_ftok_t *cl_header, *class_header;
+	char *class_name;
+	GError *err = NULL;
+
+	ctx = session->ctx;
+
+	if (!rspamd_controller_check_password(conn_ent, session, msg, TRUE)) {
+		return 0;
+	}
+
+	if (rspamd_http_message_get_body(msg, NULL) == NULL) {
+		msg_err_session("got zero length body, cannot continue");
+		rspamd_controller_send_error(conn_ent,
+									 400,
+									 "Empty body is not permitted");
+		return 0;
+	}
+
+	/* Get the class name from header */
+	class_header = rspamd_http_message_find_header(msg, "Class");
+	if (!class_header) {
+		msg_err_session("missing Class header");
+		rspamd_controller_send_error(conn_ent,
+									 400,
+									 "Class header is required for /learn endpoint");
+		return 0;
+	}
+
+	task = rspamd_task_new(session->ctx->worker, session->cfg, session->pool,
+						   session->ctx->lang_det, ctx->event_loop, FALSE);
+
+	task->resolver = ctx->resolver;
+	task->s = rspamd_session_create(session->pool,
+									rspamd_controller_learn_fin_task,
+									NULL,
+									(event_finalizer_t) rspamd_task_free,
+									task);
+	task->fin_arg = conn_ent;
+	task->http_conn = rspamd_http_connection_ref(conn_ent->conn);
+	task->sock = -1;
+	session->task = task;
+
+	cl_header = rspamd_http_message_find_header(msg, "classifier");
+	if (cl_header) {
+		session->classifier = rspamd_mempool_ftokdup(session->pool, cl_header);
+	}
+	else {
+		session->classifier = NULL;
+	}
+
+	if (!rspamd_task_load_message(task, msg, msg->body_buf.begin, msg->body_buf.len)) {
+		goto end;
+	}
+
+	/* Extract class name as a null-terminated string */
+	class_name = rspamd_mempool_alloc(session->pool, class_header->len + 1);
+	memcpy(class_name, class_header->begin, class_header->len);
+	class_name[class_header->len] = '\0';
+
+	if (!rspamd_learn_task_class(task, class_name, session->classifier, &err)) {
+		msg_err_session("failed to setup learning: %s", err ? err->message : "unknown error");
+		if (err) {
+			g_error_free(err);
+		}
+		goto end;
+	}
+
+	/* Store class name based on task flags for backward compatibility with session->is_spam */
+	session->is_spam = !!(task->flags & RSPAMD_TASK_FLAG_LEARN_SPAM);
+
+	if (!rspamd_task_process(task, RSPAMD_TASK_PROCESS_LEARN)) {
+		msg_warn_session("<%s> message cannot be processed",
+						 MESSAGE_FIELD_CHECK(task, message_id));
+		goto end;
+	}
+
+end:
+	rspamd_session_pending(task->s);
+
+	return 0;
+}
+
+
+/*
  * Scan command handler:
  * request: /scan
  * headers: Password
@@ -4048,6 +4147,9 @@ start_controller_worker(struct rspamd_worker *worker)
 	rspamd_http_router_add_path(ctx->http,
 								PATH_LEARN_HAM,
 								rspamd_controller_handle_learnham);
+	rspamd_http_router_add_path(ctx->http,
+								PATH_LEARN,
+								rspamd_controller_handle_learn);
 	rspamd_http_router_add_path(ctx->http,
 								PATH_METRICS,
 								rspamd_controller_handle_metrics);

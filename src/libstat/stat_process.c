@@ -960,6 +960,46 @@ rspamd_stat_learn(struct rspamd_task *task,
 	return ret;
 }
 
+rspamd_stat_result_t
+rspamd_stat_learn_class(struct rspamd_task *task,
+					   const char *class_name, lua_State *L, const char *classifier, unsigned int stage,
+					   GError **err)
+{
+	/* Convert class name to boolean for backward compatibility with existing code */
+	gboolean spam;
+	
+	if (class_name == NULL) {
+		g_set_error(err, rspamd_stat_quark(), 500,
+					"Class name cannot be NULL");
+		return RSPAMD_STAT_PROCESS_ERROR;
+	}
+	
+	/* Store the class name in task for future use */
+	task->learn_class = class_name;
+	
+	/* For now, map common class names to spam/ham for backward compatibility
+	 * In a full implementation, this would be removed and the entire pipeline
+	 * would work with class names directly */
+	if (g_ascii_strcasecmp(class_name, "spam") == 0) {
+		spam = TRUE;
+	}
+	else if (g_ascii_strcasecmp(class_name, "ham") == 0) {
+		spam = FALSE;
+	}
+	else {
+		/* For other classes, we'd need to extend the backend
+		 * For now, treat unknown classes as a configuration issue */
+		g_set_error(err, rspamd_stat_quark(), 500,
+					"Unknown class '%s'. Currently only 'spam' and 'ham' are supported. "
+					"Full multi-class support requires additional classifier configuration.",
+					class_name);
+		return RSPAMD_STAT_PROCESS_ERROR;
+	}
+	
+	/* Delegate to existing rspamd_stat_learn function */
+	return rspamd_stat_learn(task, spam, L, classifier, stage, err);
+}
+
 static gboolean
 rspamd_stat_has_classifier_symbols(struct rspamd_task *task,
 								   struct rspamd_scan_result *mres,
