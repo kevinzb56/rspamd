@@ -1,0 +1,88 @@
+# Example configuration for multi-class classification
+# This is a future configuration format - currently only 'spam' and 'ham' classes are supported
+
+# Basic two-class configuration (currently supported)
+classifier "bayes" {
+  tokenizer {
+    name = "osb";
+  }
+  cache {
+  }
+  new_schema = true;
+  store_tokens = false;
+  signatures = false;
+  min_tokens = 11;
+  backend = "redis";
+  min_learns = 200;
+
+  statfile {
+    symbol = "BAYES_HAM";
+    spam = false;  # Traditional boolean format
+  }
+  statfile {
+    symbol = "BAYES_SPAM";
+    spam = true;   # Traditional boolean format
+  }
+
+  learn_condition = 'return require("lua_bayes_learn").can_learn';
+}
+
+# Future multi-class configuration example (not yet fully supported)
+# This shows how the configuration might look when full multi-class support is implemented
+# 
+# classifier "bayes_multiclass" {
+#   tokenizer {
+#     name = "osb";
+#   }
+#   cache {
+#   }
+#   new_schema = true;
+#   store_tokens = false;
+#   signatures = false;
+#   min_tokens = 11;
+#   backend = "redis";
+#   min_learns = 200;
+#
+#   # Define multiple classes
+#   statfile {
+#     symbol = "BAYES_HAM";
+#     class = "ham";           # Use 'class' instead of 'spam' boolean
+#   }
+#   statfile {
+#     symbol = "BAYES_SPAM";
+#     class = "spam";
+#   }
+#   statfile {
+#     symbol = "BAYES_PHISHING";
+#     class = "phishing";      # Additional classes can be defined
+#   }
+#   statfile {
+#     symbol = "BAYES_MALWARE";
+#     class = "malware";
+#   }
+#
+#   # Multi-class classification strategy
+#   strategy = "one-vs-all";  # or "softmax" for normalized probabilities
+#
+#   learn_condition = 'return require("lua_bayes_learn").can_learn';
+# }
+
+# Using the new API to learn messages:
+#
+# Learn as spam:
+#   curl -X POST http://localhost:11334/learn \
+#     -H "Password: your-password" \
+#     -H "Class: spam" \
+#     --data-binary @spam-message.eml
+#
+# Learn as ham:
+#   curl -X POST http://localhost:11334/learn \
+#     -H "Password: your-password" \
+#     -H "Class: ham" \
+#     --data-binary @ham-message.eml
+#
+# Future: Learn as phishing (when full support is implemented):
+#   curl -X POST http://localhost:11334/learn \
+#     -H "Password: your-password" \
+#     -H "Class: phishing" \
+#     --data-binary @phishing-message.eml

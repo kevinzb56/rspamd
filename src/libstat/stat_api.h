@@ -96,7 +96,7 @@ gboolean rspamd_stat_check_autolearn(struct rspamd_task *task);
 /**
  * Learn task as spam or ham, task must be processed prior to this call
  * @param task task to learn
- * @param spam if TRUE learn spam, otherwise learn ham
+ * @param spam if TRUE learn spam, otherwise learn ham (deprecated, use rspamd_stat_learn_class)
  * @param L lua state
  * @param classifier NULL to learn all classifiers, name to learn a specific one
  * @param err error returned
@@ -106,6 +106,21 @@ rspamd_stat_result_t rspamd_stat_learn(struct rspamd_task *task,
 									   gboolean spam, lua_State *L, const char *classifier,
 									   unsigned int stage,
 									   GError **err);
+
+/**
+ * Learn task for a specific class (multi-class classification)
+ * @param task task to learn
+ * @param class_name name of the class to learn
+ * @param L lua state
+ * @param classifier NULL to learn all classifiers, name to learn a specific one
+ * @param stage learning stage
+ * @param err error returned
+ * @return TRUE if task has been learned
+ */
+rspamd_stat_result_t rspamd_stat_learn_class(struct rspamd_task *task,
+											const char *class_name, lua_State *L, const char *classifier,
+											unsigned int stage,
+											GError **err);
 
 /**
  * Get the overall statistics for all statfile backends
