@@ -30,12 +30,14 @@ static const struct luaL_reg classifierlib_m[] = {
 LUA_FUNCTION_DEF(statfile, get_symbol);
 LUA_FUNCTION_DEF(statfile, get_label);
 LUA_FUNCTION_DEF(statfile, is_spam);
+LUA_FUNCTION_DEF(statfile, get_class);
 LUA_FUNCTION_DEF(statfile, get_param);
 
 static const struct luaL_reg statfilelib_m[] = {
 	LUA_INTERFACE_DEF(statfile, get_symbol),
 	LUA_INTERFACE_DEF(statfile, get_label),
 	LUA_INTERFACE_DEF(statfile, is_spam),
+	LUA_INTERFACE_DEF(statfile, get_class),
 	LUA_INTERFACE_DEF(statfile, get_param),
 	{"__tostring", rspamd_lua_class_tostring},
 	{NULL, NULL}};
@@ -184,6 +186,28 @@ lua_statfile_is_spam(lua_State *L)
 
 	return 1;
 }
+
+static int
+lua_statfile_get_class(lua_State *L)
+{
+	struct rspamd_statfile_config *st = lua_check_statfile(L);
+
+	if (st != NULL) {
+		if (st->class_name) {
+			lua_pushstring(L, st->class_name);
+		}
+		else {
+			/* Fall back to spam/ham for backward compatibility */
+			lua_pushstring(L, st->is_spam ? "spam" : "ham");
+		}
+	}
+	else {
+		lua_pushnil(L);
+	}
+
+	return 1;
+}
+
 
 static int
 lua_statfile_get_param(lua_State *L)
